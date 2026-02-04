@@ -1,6 +1,7 @@
 import os
 import slangpy as spy
 import math
+import numpy as np
 
 COLOR_FORMAT = spy.Format.rgba32_float
 DEPTH_FORMAT = spy.Format.d32_float
@@ -10,9 +11,9 @@ def is_down(input_state, key):
 
 class Camera:
     def __init__(self):
-        self.position = spy.float3(0,0,3)
+        self.position = spy.float3(0,0,1.5)
         self.rotation = spy.float2(0,0)
-        self.fovY = spy.math.radians(70)
+        self.fovY = spy.math.radians(60)
         self.drag_start = None
         self.drag_start_rotation = None
         self.move_speed = 0.1
@@ -59,25 +60,91 @@ class Camera:
             self.position = (1 + .01/6371) * self.position/h
 
 class WorldSimulator:
+    def load_single_channel(self, path, channel, usage):
+        bitmap = spy.Bitmap(path)
+        bitmap1 = spy.Bitmap(pixel_format=spy.Bitmap.PixelFormat.r, component_type=spy.Bitmap.ComponentType.uint16, width=bitmap.width, height=bitmap.height, channel_count=1)
+        pixels  = np.array(bitmap, copy=False)
+        pixels1 = np.array(bitmap1, copy=False)
+        pixels1[:,:] = 65535.0 * (pixels[:,:,channel] / 255.0)
+        return self.texture_loader.load_texture(bitmap=bitmap1, options=spy.TextureLoader.Options({ "load_as_normalized": True, "usage": usage, "allocate_mips": False, "load_as_srgb": False }))
+
+    def load_clouds(self):
+        self.cloud_density  = self.load_single_channel("earth_clouds.png", 3, spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access)
+        self.cloud_velocity = self.device.create_texture(
+            format=spy.Format.rg32_float,
+            width=self.cloud_density.width,
+            height=self.cloud_density.height,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            label="cloud_velocity",
+            data=np.zeros((self.cloud_density.height, self.cloud_density.width))
+        )
+        self.cloud_density_out  = self.device.create_texture(
+            format=self.cloud_density.format,
+            width=self.cloud_density.width,
+            height=self.cloud_density.height,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            label="cloud_density_out"
+        )
+        self.cloud_velocity_out = self.device.create_texture(
+            format=spy.Format.rg32_float,
+            width=self.cloud_density.width,
+            height=self.cloud_density.height,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            label="cloud_velocity_out"
+        )
+
     def __init__(self, device : spy.Device):
         self.device = device
-        loader = spy.TextureLoader(self.device)
-        self.albedo_texture = loader.load_texture("earth_albedo.png", spy.TextureLoader.Options({ "allocate_mips": False, "load_as_srgb": True }))
-        self.height_texture = loader.load_texture("earth_height.png", spy.TextureLoader.Options({ "allocate_mips": False, "load_as_srgb": False }))
-        self.cloud_texture  = loader.load_texture("earth_clouds.png", spy.TextureLoader.Options({ "allocate_mips": False, "load_as_srgb": False }))
+        self.texture_loader = spy.TextureLoader(self.device)
 
-        # self.cloud_resolution = (1024, 256)
-        # self.cloudmap = self.device.create_texture(
-        #     format = spy.Format.r32_float,
-        #     width = self.cloud_resolution[0],
-        #     height = self.cloud_resolution[1],
-        #     usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-        #     label="cloudmap"
-        #     )
+        self.enabled = False
+        self.step_once = False
 
-    def step(self, dt):
-        # TODO: advance simulation by 'dt'
-        pass
+        self.surface_albedo = self.texture_loader.load_texture("earth_albedo.png", options=spy.TextureLoader.Options({ "allocate_mips": False, "load_as_srgb": True }))
+        self.surface_height = self.load_single_channel("earth_height.png", 0, spy.TextureUsage.shader_resource)
+        self.load_clouds()
+
+        self.advect_pass = self.device.create_compute_kernel(self.device.load_program("atmosphere-sim.cs.slang", ["advect"]))
+
+    def setup_ui(self, window):
+        def toggle_callback():
+            self.enabled = not self.enabled
+            self.toggle_button.label = "Pause simulation" if self.enabled else "Resume simulation"
+        self.toggle_button = spy.ui.Button(window, "Resume simulation", callback=toggle_callback)
+
+        def step_callback():
+            self.step_once = True
+        spy.ui.Button(window, "Step", callback=step_callback)
+
+        def reset_callback():
+            self.load_clouds()
+        spy.ui.Button(window, "Reset", callback=reset_callback)
+
+        self.viscosity = spy.ui.DragFloat(window, "Viscosity", value=0, min=0)
+        self.K         = spy.ui.DragFloat(window, "K", value=0.2, min=0)
+        self.dt        = spy.ui.DragFloat(window, "dt", value=0.001, min=0)
+
+    def step(self, command_encoder, dt):
+        if not self.enabled and not self.step_once:
+            return
+        self.step_once = False
+        self.advect_pass.dispatch(
+            thread_count=[self.cloud_density.width, self.cloud_density.height, 1],
+            vars={
+                "density":      self.cloud_density,
+                "velocity":     self.cloud_velocity,
+                "density_out":  self.cloud_density_out,
+                "velocity_out": self.cloud_velocity_out,
+                "dim": spy.uint2(self.cloud_density.width, self.cloud_density.height),
+                "K": self.K.value,
+                "viscosity": self.viscosity.value,
+                "dt": self.dt.value,
+            },
+            command_encoder=command_encoder
+        )
+
+        self.cloud_density,  self.cloud_density_out  = self.cloud_density_out,  self.cloud_density
+        self.cloud_velocity, self.cloud_velocity_out = self.cloud_velocity_out, self.cloud_velocity
 
 class WorldRenderer:
     def __init__(self, device : spy.Device):
@@ -112,18 +179,23 @@ class WorldRenderer:
         self.frame_seed = 0
 
     def setup_ui(self, window):        
-        self.sun_color                  = spy.ui.SliderFloat3(window, "Sun color", value=spy.float3(1.0, 1.0, 1.0), min=0, max=1)
-        self.sun_strength               = spy.ui.DragFloat(window, "Sun strength", value=10, min=0, speed=0.1)
-        self.surface_rotation           = spy.ui.SliderFloat(window, "Surface rotation", value=0.0, min=0, max=1)
-        self.cloud_rotation             = spy.ui.SliderFloat(window, "Cloud rotation", value=0.0, min=0, max=1)
-        self.cloud_density              = spy.ui.DragFloat(window, "Cloud density", value=50.0, min=0)
-        self.atmosphere_height          = spy.ui.DragFloat(window, "Atmosphere height (km)", value=100, min=0)
-        self.atmosphere_rayleigh_height = spy.ui.DragFloat(window, "Rayleigh scatter height (km)", value=4, min=0, speed=0.01)
-        self.atmosphere_mie_height      = spy.ui.DragFloat(window, "Mie scatter height (km)", value=0.6, min=0, speed=0.01)
-        self.atmosphere_rayleigh_color  = spy.ui.DragFloat3(window, "Rayleigh scatter factor", value=spy.float3(6.605, 12.344, 29.412), min=0, speed=0.1)
-        self.atmosphere_mie_color       = spy.ui.DragFloat(window, "Mie scatter factor", value=3.996, min=0, speed=0.1)
-        self.atmosphere_density         = spy.ui.DragFloat(window, "Atmosphere density", value=1, min=0, speed=0.1)
+        self.planet_radius              = spy.ui.DragFloat   (window, "Planet radius (km)",           value=6371,                              min=0)
+        self.terrain_height             = spy.ui.DragFloat   (window, "Terrain height (km)",          value=6.4,                               min=0)
+        self.cloud_height               = spy.ui.DragFloat2  (window, "Cloud height range (km)",      value=spy.float2(2,10),                  min=0)
+        self.surface_rotation           = spy.ui.SliderFloat (window, "Surface rotation",             value=0.0,                               min=0, max=1)
+        self.cloud_rotation             = spy.ui.SliderFloat (window, "Cloud rotation",               value=0.0,                               min=0, max=1)
+        self.cloud_density              = spy.ui.DragFloat   (window, "Cloud density",                value=50.0,                              min=0)
+        
+        self.atmosphere_height          = spy.ui.DragFloat   (window, "Atmosphere height (km)",       value=100,                               min=0)
+        self.atmosphere_rayleigh_height = spy.ui.DragFloat   (window, "Rayleigh scatter height (km)", value=4,                                 min=0, speed=0.01)
+        self.atmosphere_mie_height      = spy.ui.DragFloat   (window, "Mie scatter height (km)",      value=0.6,                               min=0, speed=0.01)
+        self.atmosphere_rayleigh_color  = spy.ui.DragFloat3  (window, "Rayleigh scatter factor",      value=spy.float3(6.605, 12.344, 29.412), min=0, speed=0.01)
+        self.atmosphere_mie_color       = spy.ui.DragFloat   (window, "Mie scatter factor",           value=3.996,                             min=0, speed=0.01)
+        self.atmosphere_density         = spy.ui.DragFloat   (window, "Atmosphere density",           value=1,                                 min=0, speed=0.01)
 
+        self.sun_color                  = spy.ui.SliderFloat3(window, "Sun color",                    value=spy.float3(1,1,1),                 min=0, max=1)
+        self.sun_strength               = spy.ui.DragFloat   (window, "Sun strength",                 value=10,                                min=0, speed=0.1)
+        self.sun_direction              = spy.ui.SliderFloat3(window, "Sun direction",                value=spy.float3(0,0,1),                 min=-1, max=1)
 
     def render(self,
                command_encoder : spy.CommandEncoder,
@@ -157,24 +229,25 @@ class WorldRenderer:
             camera_to_world = camera.camera_to_world()
             view = spy.math.inverse(camera_to_world)
             projection = camera.projection(render_width / render_height)
-            atmosphere_height = self.atmosphere_height.value / 6371
 
             cursor = spy.ShaderCursor(shader)
-            cursor["planet_albedo"]    = sim.albedo_texture
-            cursor["planet_height"]    = sim.height_texture
-            cursor["planet_clouds"]    = sim.cloud_texture
-            cursor["sampler"]          = self.texture_sampler
-            cursor["view_projection"]   = spy.math.mul(projection, view)
-            cursor["camera_position"]   = spy.math.transform_point(camera_to_world, spy.float3(0,0,0))
-            cursor["sphere_resolution"] = self.sphere_resolution
-            cursor["cloud_rotation"]    = self.cloud_rotation.value
-
+            cursor["planet_albedo"]              = sim.surface_albedo
+            cursor["planet_height"]              = sim.surface_height
+            cursor["planet_clouds"]              = sim.cloud_density
+            cursor["sampler"]                    = self.texture_sampler
+            cursor["view_projection"]            = spy.math.mul(projection, view)
+            cursor["camera_position"]            = spy.math.transform_point(camera_to_world, spy.float3(0,0,0))
+            cursor["sphere_resolution"]          = self.sphere_resolution
             cursor["sun_emission"]               = self.sun_color.value * self.sun_strength.value
             cursor["cloud_density"]              = self.cloud_density.value
+            cursor["sun_direction"]              = spy.math.normalize(self.sun_direction.value)
+            cursor["cloud_height_range"]         = self.cloud_height.value / self.planet_radius.value
+            cursor["terrain_height"]             = self.terrain_height.value / self.planet_radius.value
             cursor["surface_rotation"]           = self.surface_rotation.value
-            cursor["atmosphere_height"]          = atmosphere_height
-            cursor["atmosphere_rayleigh_height"] = 1 / max(1e-9, self.atmosphere_rayleigh_height.value / 6371)
-            cursor["atmosphere_mie_height"]      = 1 / max(1e-9, self.atmosphere_mie_height.value / 6371)
+            cursor["cloud_rotation"]             = self.cloud_rotation.value
+            cursor["atmosphere_height"]          = self.atmosphere_height.value / self.planet_radius.value
+            cursor["atmosphere_rayleigh_height"] = 1 / max(1e-9, self.atmosphere_rayleigh_height.value / self.planet_radius.value)
+            cursor["atmosphere_mie_height"]      = 1 / max(1e-9, self.atmosphere_mie_height.value / self.planet_radius.value)
             cursor["atmosphere_rayleigh_color"]  = self.atmosphere_rayleigh_color.value
             cursor["atmosphere_mie_color"]       = self.atmosphere_mie_color.value
             cursor["atmosphere_density"]         = self.atmosphere_density.value
@@ -220,13 +293,19 @@ class App:
     def setup_ui(self):
         screen = self.ui.screen
         window = spy.ui.Window(screen, "Settings", size=spy.float2(500, 300))
+
         self.fps_text = spy.ui.Text(window, "FPS: 0")
+        
         def pause_callback():
             self.pause = not self.pause
-        spy.ui.Button(window, "Pause", callback=pause_callback)
+            self.pause_button.label = "Resume rendering" if self.pause else "Pause rendering"
+        self.pause_button = spy.ui.Button(window, "Pause rendering", callback=pause_callback)
+
         self.camera_pos_text = spy.ui.Text(window, "Camera: 0")
         self.exposure = spy.ui.SliderFloat(window, "Exposure", value=0.0, min=-12, max=12)
-        self.renderer.setup_ui(window)
+        
+        self.simulator.setup_ui(spy.ui.Group(window, label="Simulation"))
+        self.renderer.setup_ui(spy.ui.Group(window, label="Renderer"))
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -274,10 +353,10 @@ class App:
             command_encoder = self.device.create_command_encoder()
 
             if not self.pause:
-                self.simulator.step(dt)
+                self.simulator.step(command_encoder, dt)
                 self.camera.update(self.input_state, dt)
 
-                if (self.render_texture is None or self.render_texture.width != surface_texture.width or self.render_texture.height != surface_texture.height):
+                if self.render_texture is None or self.render_texture.width != surface_texture.width or self.render_texture.height != surface_texture.height:
                     self.render_texture = self.device.create_texture(
                         format=COLOR_FORMAT,
                         width=surface_texture.width,
@@ -313,6 +392,7 @@ class App:
                     command_encoder=command_encoder
                 )
                 
+            if self.render_texture is not None:
                 command_encoder.blit(surface_texture, self.render_texture)
 
             self.camera_pos_text.text = f"Camera: {self.camera.position.x:.3f} {self.camera.position.y:.3f} {self.camera.position.z:.3f}"

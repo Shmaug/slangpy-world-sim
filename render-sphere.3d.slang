@@ -1,11 +1,6 @@
 import Math;
 import RNG;
 
-static const float  kEarthRadius = 6371; // kilometers
-static const float  kTerrainAltitude = 6.4 / kEarthRadius;
-static const float2 kCloudAltitudeRange = float2(2, 10) / kEarthRadius;
-static const float3 kSunDirection = float3(0,0,1);
-
 struct VertexOutput
 {
     float4 pos : SV_Position;
@@ -14,7 +9,7 @@ struct VertexOutput
 
 Texture2D<float4> planet_albedo;
 Texture2D<float>  planet_height;
-Texture2D<float4> planet_clouds;
+Texture2D<float>  planet_clouds;
 SamplerState sampler;
 
 uniform float4x4 view_projection;
@@ -22,19 +17,22 @@ uniform float3   camera_position;
 uniform uint     sphere_resolution;
 uniform float3   sun_emission;
 uniform float    cloud_density;
+uniform float3   sun_direction;
+uniform uint     frame_seed;
+uniform float2   cloud_height_range;
+uniform float    terrain_height;
 uniform float    surface_rotation;
 uniform float    cloud_rotation;
+uniform float    atmosphere_height;
 uniform float    atmosphere_rayleigh_height;
 uniform float    atmosphere_mie_height;
 uniform float3   atmosphere_rayleigh_color;
 uniform float    atmosphere_mie_color;
-uniform float    atmosphere_height;
 uniform float    atmosphere_density;
-uniform uint     frame_seed;
 
 float3 get_surface_pos(float2 uv)
 {
-    return uv_to_xyz(uv) * (1.0 + kTerrainAltitude * planet_height.Sample(sampler, uv + float2(surface_rotation, 0)));
+    return uv_to_xyz(uv) * (1.0 + terrain_height * planet_height.Sample(sampler, uv + float2(surface_rotation, 0)));
 }
 
 void sample_atmosphere_density(float3 p, out float3 rayleigh, out float mie, out float cloud)
@@ -42,8 +40,8 @@ void sample_atmosphere_density(float3 p, out float3 rayleigh, out float mie, out
     float len_p = length(p);
     float height = len_p - 1.0;
 
-    if (cloud_density > 0 && height >= kCloudAltitudeRange.x && height <= kCloudAltitudeRange.y)
-        cloud = cloud_density * planet_clouds.Sample(sampler, xyz_to_uv(p / len_p) + float2(cloud_rotation, 0)).a;
+    if (cloud_density > 0 && height >= cloud_height_range.x && height <= cloud_height_range.y)
+        cloud = cloud_density * planet_clouds.Sample(sampler, xyz_to_uv(p / len_p) + float2(cloud_rotation, 0));
     else
         cloud = 0;
     
@@ -55,7 +53,7 @@ void sample_atmosphere_density(float3 p, out float3 rayleigh, out float mie, out
 float3 integrate_atmosphere_density<let kSteps : uint>(float3 ray_origin, float3 ray_direction, inout RNG rng)
 {
     float2 outer_t_range;
-    if (!intersect_sphere(ray_origin, ray_direction, 1.0 + kCloudAltitudeRange.y, outer_t_range))
+    if (!intersect_sphere(ray_origin, ray_direction, 1.0 + atmosphere_height, outer_t_range))
         return 0;
     if (outer_t_range.y < 0)
         return 0; // missed the entire atmosphere
@@ -100,7 +98,7 @@ void integrate_atmosphere_color<let kSteps : uint, let kShadowSteps : uint>(floa
     if (t_range.y <= t_range.x)
         return;
 
-    float mu = dot(ray_direction, kSunDirection);
+    float mu = dot(ray_direction, sun_direction);
     float phase_r = eval_phase_henyey_greenstein(mu, 0.0);
     float phase_m = eval_phase_henyey_greenstein(mu, 0.76);
     float phase_c = eval_phase_henyey_greenstein(mu, 0.0);
@@ -125,13 +123,13 @@ void integrate_atmosphere_color<let kSteps : uint, let kShadowSteps : uint>(floa
         dc *= t_step;
 
         float2 surface_t;
-        bool hit = intersect_sphere(p, kSunDirection, 1.0, surface_t);
+        bool hit = intersect_sphere(p, sun_direction, 1.0, surface_t);
         if (!hit || surface_t.y < 0)
         {
             float2 shadow_t_range;
-            if (intersect_sphere(p, kSunDirection, 1.0 + atmosphere_height, shadow_t_range))
+            if (intersect_sphere(p, sun_direction, 1.0 + atmosphere_height, shadow_t_range))
             {
-                float3 shadow_optical_depth = integrate_atmosphere_density<kShadowSteps>(p, kSunDirection, rng);
+                float3 shadow_optical_depth = integrate_atmosphere_density<kShadowSteps>(p, sun_direction, rng);
                 float3 shadow_transmittance = exp(-(optical_depth + shadow_optical_depth));
                 inscatter += shadow_transmittance * (dr * phase_r + dm * phase_m + dc * phase_c);
             }
@@ -201,12 +199,12 @@ float4 fs(VertexOutput v) : SV_Target
 
             float3 albedo = planet_albedo.Sample(sampler, uv + float2(surface_rotation, 0)).rgb;
 
-            float3 shadow_ray_origin = p * (1 + kTerrainAltitude);
+            float3 shadow_ray_origin = p * (1 + terrain_height);
             
             // lambertian
-            float3 brdf = albedo * max(0, dot(kSunDirection, normal));
+            float3 brdf = albedo * max(0, dot(sun_direction, normal));
 
-            float3 shadow_density = integrate_atmosphere_density<50>(shadow_ray_origin, kSunDirection, rng);
+            float3 shadow_density = integrate_atmosphere_density<50>(shadow_ray_origin, sun_direction, rng);
             color = float4(brdf * sun_emission * exp(-shadow_density), 0);
         }
         else
@@ -219,6 +217,11 @@ float4 fs(VertexOutput v) : SV_Target
     else
     {
         surface_t.x = 1e9;
+    }
+
+    if (color.a == 1 && max(0, dot(ray_direction, sun_direction)) > 0.99998919279) // cosine of half of angular size of sun: cos( arcsin( 2*695508 / (2*149600000) ) )
+    {
+        color = float4(sun_emission, 0);
     }
 
     float3 inscatter;
