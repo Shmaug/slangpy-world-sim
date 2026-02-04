@@ -21,7 +21,7 @@ void main(uint3 index : SV_DispatchThreadID)
     {
         float4 color = image[index.xy];
         color.rgb *= exp2(exposure);
-        // color.rgb = aces_film(color.rgb);
+        color.rgb = aces_film(color.rgb);
         color.rgb = pow(color.rgb, 1.0 / 2.2);
         image[index.xy] = color;
     }

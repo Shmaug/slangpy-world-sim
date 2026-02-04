@@ -10,11 +10,12 @@ def is_down(input_state, key):
 
 class Camera:
     def __init__(self):
-        self.position = spy.float3(0,0,5)
+        self.position = spy.float3(0,0,3)
         self.rotation = spy.float2(0,0)
         self.fovY = spy.math.radians(70)
         self.drag_start = None
         self.drag_start_rotation = None
+        self.move_speed = 0.1
         self.sensitivity = .002
 
     def get_rotation(self):
@@ -49,9 +50,13 @@ class Camera:
         if is_down(input_state, spy.KeyCode.d): move += spy.float3(1,0,0)
         if is_down(input_state, spy.KeyCode.q): move += spy.float3(0,-1,0)
         if is_down(input_state, spy.KeyCode.e): move += spy.float3(0,1,0)
-        if is_down(input_state, spy.KeyCode.left_control): move *= 0.1
+        move *= self.move_speed
+        if is_down(input_state, spy.KeyCode.left_control): move *= 0.01
         if is_down(input_state, spy.KeyCode.left_shift): move *= 10.0
         self.position += spy.math.transform_vector(self.get_rotation(), move) * dt
+        h = spy.math.length(self.position)
+        if h < (1 + .01/6371): # limit to 10m above surface
+            self.position = (1 + .01/6371) * self.position/h
 
 class WorldSimulator:
     def __init__(self, device : spy.Device):
@@ -83,8 +88,8 @@ class WorldRenderer:
             input_layout=None,
             targets=[spy.ColorTargetDesc({
                 "format": COLOR_FORMAT, 
-                "color": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.src_alpha, "dst_factor": spy.BlendFactor.inv_src_alpha, "op": spy.BlendOp.add}),
-                "alpha": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.one,       "dst_factor": spy.BlendFactor.zero,          "op": spy.BlendOp.add}),
+                "color": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.one, "dst_factor": spy.BlendFactor.src_alpha, "op": spy.BlendOp.add}), # transmittance blending
+                "alpha": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.one, "dst_factor": spy.BlendFactor.zero,      "op": spy.BlendOp.add}),
                 "write_mask": spy.RenderTargetWriteMask.enable_all, 
                 "enable_blend": True
             })],
@@ -104,7 +109,21 @@ class WorldRenderer:
         
         self.texture_sampler = self.device.create_sampler(spy.SamplerDesc())
         self.sphere_resolution = 64
-        self.cloud_rotation = 0
+        self.frame_seed = 0
+
+    def setup_ui(self, window):        
+        self.sun_color                  = spy.ui.SliderFloat3(window, "Sun color", value=spy.float3(1.0, 1.0, 1.0), min=0, max=1)
+        self.sun_strength               = spy.ui.DragFloat(window, "Sun strength", value=10, min=0, speed=0.1)
+        self.surface_rotation           = spy.ui.SliderFloat(window, "Surface rotation", value=0.0, min=0, max=1)
+        self.cloud_rotation             = spy.ui.SliderFloat(window, "Cloud rotation", value=0.0, min=0, max=1)
+        self.cloud_density              = spy.ui.DragFloat(window, "Cloud density", value=50.0, min=0)
+        self.atmosphere_height          = spy.ui.DragFloat(window, "Atmosphere height (km)", value=100, min=0)
+        self.atmosphere_rayleigh_height = spy.ui.DragFloat(window, "Rayleigh scatter height (km)", value=4, min=0, speed=0.01)
+        self.atmosphere_mie_height      = spy.ui.DragFloat(window, "Mie scatter height (km)", value=0.6, min=0, speed=0.01)
+        self.atmosphere_rayleigh_color  = spy.ui.DragFloat3(window, "Rayleigh scatter factor", value=spy.float3(6.605, 12.344, 29.412), min=0, speed=0.1)
+        self.atmosphere_mie_color       = spy.ui.DragFloat(window, "Mie scatter factor", value=3.996, min=0, speed=0.1)
+        self.atmosphere_density         = spy.ui.DragFloat(window, "Atmosphere density", value=1, min=0, speed=0.1)
+
 
     def render(self,
                command_encoder : spy.CommandEncoder,
@@ -120,7 +139,7 @@ class WorldRenderer:
                 "view": render_texture_view,
                 "load_op": spy.LoadOp.clear,
                 "store_op": spy.StoreOp.store,
-                "clear_value": spy.float4(0.1,0.1,0.1,0)
+                "clear_value": spy.float4(0,0,0,0)
             }) ],
             "depth_stencil_attachment": spy.RenderPassDepthStencilAttachment({
                 "view": depth_texture_view,
@@ -135,10 +154,10 @@ class WorldRenderer:
                 "scissor_rects": [ spy.ScissorRect.from_size(render_width, render_height) ],
             })
 
-
             camera_to_world = camera.camera_to_world()
             view = spy.math.inverse(camera_to_world)
             projection = camera.projection(render_width / render_height)
+            atmosphere_height = self.atmosphere_height.value / 6371
 
             cursor = spy.ShaderCursor(shader)
             cursor["planet_albedo"]    = sim.albedo_texture
@@ -148,8 +167,22 @@ class WorldRenderer:
             cursor["view_projection"]   = spy.math.mul(projection, view)
             cursor["camera_position"]   = spy.math.transform_point(camera_to_world, spy.float3(0,0,0))
             cursor["sphere_resolution"] = self.sphere_resolution
-            cursor["cloud_rotation"]    = self.cloud_rotation
+            cursor["cloud_rotation"]    = self.cloud_rotation.value
+
+            cursor["sun_emission"]               = self.sun_color.value * self.sun_strength.value
+            cursor["cloud_density"]              = self.cloud_density.value
+            cursor["surface_rotation"]           = self.surface_rotation.value
+            cursor["atmosphere_height"]          = atmosphere_height
+            cursor["atmosphere_rayleigh_height"] = 1 / max(1e-9, self.atmosphere_rayleigh_height.value / 6371)
+            cursor["atmosphere_mie_height"]      = 1 / max(1e-9, self.atmosphere_mie_height.value / 6371)
+            cursor["atmosphere_rayleigh_color"]  = self.atmosphere_rayleigh_color.value
+            cursor["atmosphere_mie_color"]       = self.atmosphere_mie_color.value
+            cursor["atmosphere_density"]         = self.atmosphere_density.value
+            cursor["frame_seed"]                 = self.frame_seed
+
             pass_encoder.draw(spy.DrawArguments({"vertex_count": self.sphere_resolution*self.sphere_resolution*6}))
+
+            self.frame_seed += 1
 
 class App:
     def __init__(self):
@@ -175,7 +208,6 @@ class App:
         self.input_state = {}
         self.render_texture = None
         self.fps_avg = 0
-        self.setup_ui()
 
         self.simulator  = WorldSimulator(self.device)
         self.renderer   = WorldRenderer(self.device)
@@ -183,17 +215,18 @@ class App:
 
         self.tonemapper = self.device.create_compute_kernel(self.device.load_program("tonemap.cs.slang", ["main"]))
 
+        self.setup_ui()
+
     def setup_ui(self):
         screen = self.ui.screen
         window = spy.ui.Window(screen, "Settings", size=spy.float2(500, 300))
         self.fps_text = spy.ui.Text(window, "FPS: 0")
-        self.camera_pos_text = spy.ui.Text(window, "Camera: 0")
-
-        self.exposure = spy.ui.SliderFloat(window, "Exposure", value=0.0, min=-12, max=12)
-
         def pause_callback():
             self.pause = not self.pause
         spy.ui.Button(window, "Pause", callback=pause_callback)
+        self.camera_pos_text = spy.ui.Text(window, "Camera: 0")
+        self.exposure = spy.ui.SliderFloat(window, "Exposure", value=0.0, min=-12, max=12)
+        self.renderer.setup_ui(window)
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -242,9 +275,7 @@ class App:
 
             if not self.pause:
                 self.simulator.step(dt)
-
                 self.camera.update(self.input_state, dt)
-                self.renderer.cloud_rotation += dt
 
                 if (self.render_texture is None or self.render_texture.width != surface_texture.width or self.render_texture.height != surface_texture.height):
                     self.render_texture = self.device.create_texture(
