@@ -16,10 +16,14 @@ class FluidSimulator:
         self.enabled = False
         self.step_once = False
         self.density = None
-        self.init_pass   = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["main"]))
-        self.advect_pass = self.device.create_compute_kernel(self.device.load_program("fluid-sim.cs.slang", ["advect"]))
-        self.pressure_solve_pass = self.device.create_compute_kernel(self.device.load_program("fluid-sim.cs.slang", ["pressure_solve"]))
-        self.pressure_project_pass = self.device.create_compute_kernel(self.device.load_program("fluid-sim.cs.slang", ["pressure_project"]))
+        self.init_pass     = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["main"]))
+        self.interact_pass = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["drag"]))
+        self.advect_pass   = self.device.create_compute_kernel(self.device.load_program("advect.cs.slang", ["advect"]))
+        self.pressure_project_passes = {
+            entry: self.device.create_compute_kernel(self.device.load_program("pressure-project.cs.slang", [entry]))
+            for entry in [ "calculate_residuals", "mul_A", "update_residuals", "update_cell_d" ]
+        }
+
         self.linear_sampler = self.device.create_sampler(
             address_u=spy.TextureAddressingMode.clamp_to_border,
             address_v=spy.TextureAddressingMode.clamp_to_border,
@@ -41,6 +45,7 @@ class FluidSimulator:
         spy.ui.Button(window, "Reset", callback=reset_callback)
 
         self.resolution = spy.ui.DragInt2(window, "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
+        self.pressure_project_iterations = spy.ui.DragInt(window, "Pressure project iterations", value=10, min=1)
         self.K         = spy.ui.DragFloat(window, "K", value=0.2, min=0)
         self.dt        = spy.ui.DragFloat(window, "dt", value=0.1, min=0)
     
@@ -60,6 +65,7 @@ class FluidSimulator:
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
             label=f"velocity_x_{i}",
         ) for i in range(2)]
+
         self.velocity_y, self.velocity_y_out = [ self.device.create_texture(
             format=spy.Format.rg32_float,
             width=self.resolution.value.x,
@@ -68,19 +74,73 @@ class FluidSimulator:
             label=f"velocity_y_{i}",
         ) for i in range(2)]
 
+        self.cell_r, self.cell_d, self.cell_q = [ self.device.create_texture(
+            format=spy.Format.r32_float,
+            width=self.resolution.value.x,
+            height=self.resolution.value.y,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            label=label,
+        ) for label in [ "cell_r", "cell_d", "cell_q" ] ]
+        self.r_dot_r, self.d_dot_q = [ self.device.create_texture(
+            format=spy.Format.r32_float,
+            width=self.resolution.value.x,
+            height=self.resolution.value.y,
+            mip_count=spy.ALL_MIPS,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access | spy.TextureUsage.copy_source,
+            label=label,
+        ) for label in [ "r_dot_r", "d_dot_q" ] ]
+        self.prev_sigma = self.device.create_texture(
+            format=spy.Format.r32_float,
+            width=1,
+            height=1,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.copy_destination,
+            label="prev_sigma",
+        )
 
         self.init_pass.dispatch(
-            thread_count=[self.density.width, self.density.height, 1],
-            vars={
-                "density":  self.density,
+            [self.density.width, self.density.height, 1], {
+                "density":    self.density,
                 "velocity_x": self.velocity_x,
                 "velocity_y": self.velocity_y,
                 "dim": spy.uint2(self.density.width, self.density.height),
             },
-            command_encoder=command_encoder
+            command_encoder
+        )
+        command_encoder.clear_texture_float(self.density_out)
+        command_encoder.clear_texture_float(self.velocity_x_out)
+        command_encoder.clear_texture_float(self.velocity_y_out)
+
+    def emit_drag(self, command_encoder, drag_start, drag_stop, drag_radius, drag_velocity):
+        if self.density is None:
+            return
+        self.interact_pass.dispatch(
+            [self.density.width+1, self.density.height+1, 1], {
+                "density":    self.density,
+                "velocity_x": self.velocity_x,
+                "velocity_y": self.velocity_y,
+                "dim": spy.uint2(self.density.width, self.density.height),
+                "drag_start": drag_start,
+                "drag_stop":  drag_stop,
+                "drag_radius":  drag_radius,
+                "drag_velocity":  drag_velocity
+            },
+            command_encoder
         )
 
-    def step(self, command_encoder, dt):
+    def swap_density(self):
+        self.density, self.density_out = self.density_out, self.density
+    def swap_velocity(self):
+        self.velocity_x, self.velocity_x_out = self.velocity_x_out, self.velocity_x
+        self.velocity_y, self.velocity_y_out = self.velocity_y_out, self.velocity_y
+
+    def get_density(self):
+        return self.density
+    def get_velocity_x(self):
+        return self.velocity_x
+    def get_velocity_y(self):
+        return self.velocity_y
+    
+    def step(self, command_encoder:spy.CommandEncoder, dt):
         if self.density is None:
             self.initialize(command_encoder)
 
@@ -91,8 +151,8 @@ class FluidSimulator:
 
         for checker_iteration in range(2):
             self.advect_pass.dispatch(
-                thread_count=[self.density.width//2, self.density.height, 1],
-                vars={
+                [self.density.width//2, self.density.height, 1],
+                {
                     "density":        self.density,
                     "velocity_x":     self.velocity_x,
                     "velocity_y":     self.velocity_y,
@@ -105,58 +165,53 @@ class FluidSimulator:
                     "K": self.K.value,
                     "dt": self.dt.value,
                 },
-                command_encoder=command_encoder
+                command_encoder
             )
-
-        self.pressure_solve_pass.dispatch(
-            thread_count=[self.density.width+1, self.density.height+1, 1],
-            vars={
-                "density":        self.density,
-                "velocity_x":     self.velocity_x,
-                "velocity_y":     self.velocity_y,
-                "density_out":    self.density_out,
-                "velocity_x_out": self.velocity_x_out,
-                "velocity_y_out": self.velocity_y_out,
-                "linear_sampler": self.linear_sampler,
-                "dim": spy.uint2(self.density.width, self.density.height),
-                "K": self.K.value,
-                "dt": self.dt.value,
-            },
-            command_encoder=command_encoder
-        )
+        self.swap_velocity()
+        self.swap_density()
         
-        self.velocity_x, self.velocity_x_out = self.velocity_x_out, self.velocity_x
-        self.velocity_y, self.velocity_y_out = self.velocity_y_out, self.velocity_y
-
-        for checker_iteration in range(2):
-            self.pressure_project_pass.dispatch(
-                thread_count=[self.density.width//2, self.density.height, 1],
-                vars={
-                    "density":        self.density,
-                    "velocity_x":     self.velocity_x,
-                    "velocity_y":     self.velocity_y,
-                    "density_out":    self.density_out,
-                    "velocity_x_out": self.velocity_x_out,
-                    "velocity_y_out": self.velocity_y_out,
-                    "linear_sampler": self.linear_sampler,
+        def dispatch_pressure_project_kernel(entry):
+            self.pressure_project_passes[entry].dispatch(
+                [self.density.width, self.density.height, 1], 
+                {
+                    "density":      self.density,
+                    "velocity_x":   self.velocity_x,
+                    "velocity_y":   self.velocity_y,
+                    "density_out":  self.density_out,
+                    "cell_r":       self.cell_r,
+                    "cell_d":       self.cell_d,
+                    "cell_q":       self.cell_q,
+                    "r_dot_r":      self.r_dot_r,
+                    "d_dot_q":      self.d_dot_q,
+                    "r_dot_r_view": self.r_dot_r.create_view(mip=self.r_dot_r.mip_count-1, mip_count=1),
+                    "d_dot_q_view": self.d_dot_q.create_view(mip=self.d_dot_q.mip_count-1, mip_count=1),
+                    "prev_sigma":   self.prev_sigma,
                     "dim": spy.uint2(self.density.width, self.density.height),
-                    "checker_iteration": checker_iteration,
-                    "K": self.K.value,
-                    "dt": self.dt.value,
                 },
-                command_encoder=command_encoder
+                command_encoder
             )
 
-        self.density,  self.density_out  = self.density_out,  self.density
-
-    def get_density(self):
-        return self.density
+        if self.pressure_project_iterations.value > 0:
+            dispatch_pressure_project_kernel("calculate_residuals")
+            command_encoder.generate_mips(self.r_dot_r)
+            for pressure_project_iteration in range(self.pressure_project_iterations.value):
+                command_encoder.copy_texture(
+                    self.prev_sigma, 0, 0, [0,0,0],
+                    self.r_dot_r, 0, self.r_dot_r.mip_count-1,[0,0,0],
+                    [1,1,1],
+                )
+                dispatch_pressure_project_kernel("mul_A")
+                command_encoder.generate_mips(self.d_dot_q)
+                dispatch_pressure_project_kernel("update_residuals")
+                command_encoder.generate_mips(self.r_dot_r)
+                dispatch_pressure_project_kernel("update_cell_d")
+            self.swap_density()
 
 class App:
     def __init__(self):
         super().__init__()
         self.device = spy.create_device(
-            type=spy.DeviceType.vulkan,
+            # type=spy.DeviceType.vulkan,
             include_paths=[os.path.abspath(os.path.dirname(__file__)), os.path.abspath("src")],
         )
         self.window = spy.Window(width=1400, height=(1400*9)//16, title="App", resizable=True)
@@ -195,6 +250,8 @@ class App:
         self.fps_text = spy.ui.Text(window, "FPS: 0")
         
         self.simulator.setup_ui(spy.ui.Group(window, label="Simulation"))
+
+        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Density", "Velocity" ])
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -263,10 +320,13 @@ class App:
                 thread_count=[self.render_texture.width, self.render_texture.height, 1],
                 vars={
                     "render_target": self.render_texture,
-                    "image": self.simulator.get_density(),
+                    "density": self.simulator.get_density(),
+                    "velocity_x": self.simulator.get_velocity_x(),
+                    "velocity_y": self.simulator.get_velocity_y(),
                     "sampler": self.linear_sampler,
                     "screen_size": [self.render_texture.width, self.render_texture.height],
                     "screen_rect": spy.uint4(p0, p0 + fluid_dim),
+                    "render_mode": self.render_mode.value
                 },
                 command_encoder=command_encoder
             )
@@ -274,6 +334,13 @@ class App:
             command_encoder.blit(surface_texture, self.render_texture)
 
             self.fps_text.text = f"FPS: {self.fps_avg:.2f}"
+
+            if is_down(self.input_state, spy.MouseButton.left) and "mouse" in self.input_state:
+                if self.drag_start is not None:
+                    self.simulator.emit_drag(command_encoder, self.drag_start, self.input_state["mouse"] - p0, 20, 0.1)
+                self.drag_start = self.input_state["mouse"] - p0
+            else:
+                self.drag_start = None
 
             self.ui.end_frame(surface_texture, command_encoder)
 

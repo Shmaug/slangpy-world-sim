@@ -1,9 +1,13 @@
 RWTexture2D<float4> render_target;
-Texture2D<float> image;
+
+Texture2D<float> density;
+Texture2D<float> velocity_x;
+Texture2D<float> velocity_y;
 SamplerState sampler;
 
 uniform uint4 screen_rect;
 uniform uint2 screen_size;
+uniform uint  render_mode;
 
 float3 viridis(float t) {
     const float3 c0 = float3(0.2777273272234177, 0.005407344544966578, 0.3340998053353061);
@@ -27,8 +31,18 @@ void main(uint2 pixel : SV_DispatchThreadID)
 
     if (all(pixel >= screen_rect.xy) && all(pixel < screen_rect.zw))
     {
-        float2 uv = (pixel - screen_rect.xy + 0.5) / (screen_rect.zw - screen_rect.xy);
-        c.rgb = viridis(saturate(image.SampleLevel(sampler, uv, 0)));
+        float2 duv = 1 / float2(screen_rect.zw - screen_rect.xy);
+        float2 uv = (pixel - screen_rect.xy + 0.5) * duv;
+        if (render_mode == 0)
+            c.rgb = viridis(saturate(density.SampleLevel(sampler, uv, 0)));
+        else
+        {
+            float vx0 = velocity_x.SampleLevel(sampler, uv, 0);
+            float vy0 = velocity_y.SampleLevel(sampler, uv, 0);
+            float vx1 = velocity_x.SampleLevel(sampler, uv + float2(duv.x, 0), 0);
+            float vy1 = velocity_y.SampleLevel(sampler, uv + float2(0, duv.y), 0);
+            c.rgb = float3(.5+(vx0 + vx1) * .5, .5+(vy0 + vy1) * .5, 1);
+        }
     }
     render_target[pixel] = c;
 }
