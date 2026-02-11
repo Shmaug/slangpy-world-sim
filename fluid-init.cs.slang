@@ -29,7 +29,7 @@ void main(uint3 index : SV_DispatchThreadID)
             d = 1;
     }
 
-    v = 4 * float2(to_c.y, -to_c.x) / max(dim.x, dim.y);
+    //v = 4 * float2(to_c.y, -to_c.x) / max(dim.x, dim.y);
 
     /*/
     const float r = max(dim.x, dim.y)/10.0;
@@ -63,6 +63,7 @@ float distance2_to_drag(float2 pos)
     float2 drag_dir = drag_stop - drag_start;
     float drag_length = length(drag_dir);
     drag_dir /= drag_length;
+    
     float drag_t = saturate(dot(drag_dir, pos - drag_start) / drag_length);
     float2 pos_on_line = drag_start + drag_dir * drag_t;
     float2 d = pos - pos_on_line;
@@ -92,7 +93,7 @@ void drag(uint3 index : SV_DispatchThreadID)
     // add velocity to edges within radius
 
     // top edge of cell
-    if (pos.x > 0 && pos.x < dim.x - 1)
+    if (pos.y > 0 && pos.y < dim.y)
     {
         float r2 = distance2_to_drag(pos + float2(0.5, 0)) / (drag_radius * drag_radius);
         if (r2 < 1.0)
@@ -102,7 +103,7 @@ void drag(uint3 index : SV_DispatchThreadID)
     }
 
     // left edge of cell
-    if (pos.y > 0 && pos.y < dim.y - 1)
+    if (pos.x > 0 && pos.x < dim.x)
     {
         float r2 = distance2_to_drag(pos + float2(0.0, 0.5)) / (drag_radius * drag_radius);
         if (r2 < 1.0)

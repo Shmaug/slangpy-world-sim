@@ -10,34 +10,30 @@ RWTexture2D<float> velocity_x_out;
 RWTexture2D<float> velocity_y_out;
 
 uniform uint2 dim;
-uniform uint checker_iteration;
+uniform uint  checker_iteration;
 uniform float K;
 uniform float dt;
 
-float load_density(int2 coord)
-{
-    return all(coord >= 0) && all(coord < dim) ? density[coord] : 0;
-}
-
 float2 sample_velocity(float2 coord)
 {
-    int2 cell = clamp(int2(floor(coord)), 0, dim-1);
+    float2 v = float2(
+        velocity_x.SampleLevel(linear_sampler, coord/dim, 0),
+        velocity_y.SampleLevel(linear_sampler, coord/dim, 0)
+    );
 
-    float vx0 = velocity_x[cell];
-    float vx1 = velocity_x[cell + int2(1, 0)];
-    float vy0 = velocity_y[cell];
-    float vy1 = velocity_y[cell + int2(0, 1)];
+    /*
+    int2 cell = int2(floor(coord));
+    if (all(cell >= 0) && all(cell < dim))
+    {
+        float d  = density[cell];
+        if (cell.x > 0)     v.x -= d - density[cell + int2(-1,  0)];
+        if (cell.x < dim.x) v.x += d - density[cell + int2( 1,  0)];
+        if (cell.y > 0)     v.y -= d - density[cell + int2( 0, -1)];
+        if (cell.x < dim.y) v.y += d - density[cell + int2( 0,  1)];
+    }
+    //*/
 
-    float d  = density[cell];
-    if (cell.x > 0)     vx0 -= d - density[cell + int2(-1,  0)];
-    if (cell.x < dim.x) vx1 += d - density[cell + int2( 1,  0)];
-    if (cell.y > 0)     vy0 -= d - density[cell + int2( 0, -1)];
-    if (cell.x < dim.y) vy1 += d - density[cell + int2( 0,  1)];
-
-    float2 w = frac(clamp(coord, 0, dim - 1));
-    float vx = lerp(vx0, vx1, w.x);
-    float vy = lerp(vy0, vy1, w.y);
-    return float2(vx, vy);
+    return v;
 }
 
 [shader("compute")]
@@ -51,9 +47,9 @@ void advect(uint3 index : SV_DispatchThreadID)
     float2 velocity = sample_velocity(cell + 0.5);
 
     float2 p = (cell + 0.5) - dt * velocity;
-    
-    density_out[cell] = density.SampleLevel(linear_sampler, p / dim, 0);
 
+    density_out[cell] = density.SampleLevel(linear_sampler, p / dim, 0);
+    
     float2 advected_velocity = sample_velocity(p);
 
     float avx0 = advected_velocity.x * 0.5;
@@ -67,6 +63,11 @@ void advect(uint3 index : SV_DispatchThreadID)
         avy0 += velocity_y_out[cell];
         avy1 += velocity_y_out[cell + int2(0, 1)];
     }
+
+    if (cell.x == 0) avx0 = 0;
+    if (cell.y == 0) avy0 = 0;
+    if (cell.x == dim.x-1) avx1 = 0;
+    if (cell.y == dim.y-1) avy1 = 0;
 
     velocity_x_out[cell]              = avx0;
     velocity_x_out[cell + int2(1, 0)] = avx1;

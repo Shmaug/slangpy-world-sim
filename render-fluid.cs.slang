@@ -34,14 +34,21 @@ void main(uint2 pixel : SV_DispatchThreadID)
         float2 duv = 1 / float2(screen_rect.zw - screen_rect.xy);
         float2 uv = (pixel - screen_rect.xy + 0.5) * duv;
         if (render_mode == 0)
+        {
             c.rgb = viridis(saturate(density.SampleLevel(sampler, uv, 0)));
+        }
         else
         {
             float vx0 = velocity_x.SampleLevel(sampler, uv, 0);
-            float vy0 = velocity_y.SampleLevel(sampler, uv, 0);
             float vx1 = velocity_x.SampleLevel(sampler, uv + float2(duv.x, 0), 0);
+            float vy0 = velocity_y.SampleLevel(sampler, uv, 0);
             float vy1 = velocity_y.SampleLevel(sampler, uv + float2(0, duv.y), 0);
-            c.rgb = float3(.5+(vx0 + vx1) * .5, .5+(vy0 + vy1) * .5, 1);
+            float2 v = float2(vx0 + vx1, vy0 + vy1) * 0.5;
+            float div = (vx1 - vx0) + (vy1 - vy0);
+            if (render_mode == 1)
+                c.rgb = float3(v*.5+.5,1);
+            else
+                c.rgb = saturate(float3(1-exp(-3*float2(-div,div)),abs(div)));
         }
     }
     render_target[pixel] = c;
