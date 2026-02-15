@@ -18,18 +18,13 @@ class FluidSimulator:
         self.initialized = False
         self.vars = {}
         
-        # self.init_pass       = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["main"]))
-        # self.emit_smoke_pass = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["emit_smoke"]))
-        # self.interact_pass   = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["drag"]))
-        
         self.passes = {
             entry: self.device.create_compute_kernel(self.device.load_program("coflip.cs.slang", [entry]))
             for entry in [
                 "init_particles",
 
-                "particle_to_grid_clear",
+                "build_particle_map",
                 "particle_to_grid",
-                "particle_to_grid_normalize",
 
                 "compute_divergence",
                 "pressure_projection",
@@ -38,6 +33,8 @@ class FluidSimulator:
                 "advect_particles"
             ]
         }
+        self.passes["particle_map_compute_offsets"] = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["compute_offsets"]))
+        self.passes["particle_map_sort"] = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["sort"]))
 
     def setup_ui(self, window):
         def toggle_callback():
@@ -53,35 +50,35 @@ class FluidSimulator:
             self.initialized = False
         spy.ui.Button(window, "Reset", callback=reset_callback)
 
-        self.resolution = spy.ui.DragInt2(window, "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
-        self.num_particles = spy.ui.DragInt(window, "Particles", 1000, callback=reset_callback)
-        self.advection_iterations = spy.ui.DragInt(window, "Advection iterations", value=3, min=1)
-        self.pressure_project_iterations = spy.ui.DragInt(window, "Pressure projection iterations", value=50, min=1)
-        self.dt        = spy.ui.DragFloat(window, "dt", value=0.1, min=0)
-        self.smoke     = spy.ui.CheckBox(window, "Smoke")
+        self.resolution                  = spy.ui.DragInt2(window,  "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
+        self.num_particles               = spy.ui.DragInt(window,   "Particles", 10000, callback=reset_callback)
+        self.advection_iterations        = spy.ui.DragInt(window,   "Advection iterations", value=3, min=1)
+        self.pressure_project_iterations = spy.ui.DragInt(window,   "Pressure projection iterations", value=50, min=1)
+        self.dt                          = spy.ui.DragFloat(window, "dt", value=0.1, min=0)
+        self.smoke                       = spy.ui.CheckBox(window,  "Smoke")
     
     def initialize(self, command_encoder:spy.CommandEncoder):
-        u_grid, u_weight, u_sum = [ self.device.create_texture(
+        u_grid = self.device.create_texture(
             format=spy.Format.r32_float,
             width=self.resolution.value.x+1,
             height=self.resolution.value.y,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label=label,
-        ) for label in ["u_grid", "u_weight", "u_sum"] ]
-        v_grid, v_weight, v_sum = [ self.device.create_texture(
+            label="u_grid",
+        )
+        v_grid = self.device.create_texture(
             format=spy.Format.r32_float,
             width=self.resolution.value.x,
             height=self.resolution.value.y+1,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label=label,
-        ) for label in ["v_grid", "v_weight", "v_sum"] ]
-        density, divergence, p_grid, p_grid_out = [ self.device.create_texture(
+            label="v_grid",
+        )
+        density_grid, divergence, p_grid, p_grid_out = [ self.device.create_texture(
             format=spy.Format.r32_float,
             width=self.resolution.value.x,
             height=self.resolution.value.y,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
             label=label,
-        ) for label in ["density", "divergence", "p_grid", "p_grid_out"]]
+        ) for label in ["density_grid", "divergence", "p_grid", "p_grid_out"]]
 
         particle_pos_impulse = self.device.create_buffer(
             element_count=self.num_particles.value,
@@ -96,50 +93,85 @@ class FluidSimulator:
             usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access
         )
 
+        self.particle_map_vars = {
+            "data": self.device.create_buffer(
+                element_count=self.num_particles.value,
+                struct_size=4,
+                format=spy.Format.r32_uint,
+                usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access
+            ),
+            "sorted_data": self.device.create_buffer(
+                element_count=self.num_particles.value,
+                struct_size=4,
+                format=spy.Format.r32_uint,
+                usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access
+            ),
+            "data_indices": self.device.create_buffer(
+                element_count=self.num_particles.value,
+                struct_size=8,
+                format=spy.Format.rg32_uint,
+                usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access
+            ),
+            "data_counters": self.device.create_buffer(
+                element_count=2,
+                struct_size=4,
+                format=spy.Format.r32_uint,
+                usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access
+            ),
+            "cell_data_offsets": self.device.create_buffer(
+                element_count=(self.resolution.value.x + 4)*(self.resolution.value.y + 4),
+                struct_size=4,
+                format=spy.Format.r32_uint,
+                usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access
+            ),
+            "cell_counters": self.device.create_buffer(
+                element_count=(self.resolution.value.x + 4)*(self.resolution.value.y + 4),
+                struct_size=4,
+                format=spy.Format.r32_uint,
+                usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access
+            ),
+            "grid_size": [self.resolution.value.x+4, self.resolution.value.y+4],
+            "grid_offset": [2, 2],
+            "capacity": self.num_particles.value
+        }
         self.vars={
             "particle_pos_impulse": particle_pos_impulse,
             "particle_volume": particle_volume,
-            "density":    density,
+            "density_grid": density_grid,
             "u_grid":     u_grid,
             "v_grid":     v_grid,
-            "u_weight":   u_weight,
-            "v_weight":   v_weight,
-            "u_sum":      u_sum,
-            "v_sum":      v_sum,
             "divergence": divergence,
             "p_grid":     p_grid,
             "p_grid_out": p_grid_out,
             "resolution": self.resolution.value,
             "cell_size":  1 / self.resolution.value.x,
             "num_particles": self.num_particles.value,
+            "particle_map": self.particle_map_vars,
             "dt": self.dt.value,
             "init_seed": 1234
         }
 
-        self.passes["init_particles"].dispatch([self.resolution.value.x, self.resolution.value.y, 1], self.vars, command_encoder)
+        self.passes["init_particles"].dispatch([4096, (self.num_particles.value+4095)//4096, 1], self.vars, command_encoder)
 
         self.initialized = True
 
-    def emit_drag(self, command_encoder, drag_start, drag_stop, drag_radius, drag_velocity):
-        if self.density is None:
-            return
-        # self.interact_pass.dispatch(
-        #     [self.density.width+1, self.density.height+1, 1], {
-        #         "density":    self.density,
-        #         "velocity_x": self.velocity_x,
-        #         "velocity_y": self.velocity_y,
-        #         "dim": spy.uint2(self.density.width, self.density.height),
-        #         "drag_start": drag_start,
-        #         "drag_stop":  drag_stop,
-        #         "drag_radius":  drag_radius,
-        #         "drag_velocity":  drag_velocity
-        #     },
-        #     command_encoder
-        # )
+        self.particle_to_grid(command_encoder)
 
-    def get_density(self):    return self.vars["density"]
+    def get_density(self):    return self.vars["density_grid"]
     def get_velocity_x(self): return self.vars["u_grid"]
     def get_velocity_y(self): return self.vars["v_grid"]
+
+    def particle_to_grid(self, command_encoder:spy.CommandEncoder):
+        particle_dispatch_dim = [4096, (self.num_particles.value+4095)//4096, 1]
+
+        command_encoder.clear_buffer(self.particle_map_vars["data_counters"])
+        command_encoder.clear_buffer(self.particle_map_vars["cell_counters"])
+        self.passes["build_particle_map"].dispatch(particle_dispatch_dim, self.vars, command_encoder)
+
+        self.passes["particle_map_compute_offsets"].dispatch(self.particle_map_vars["grid_size"] + [1], {"particle_map": self.particle_map_vars}, command_encoder)
+        self.passes["particle_map_sort"].dispatch(particle_dispatch_dim, {"particle_map": self.particle_map_vars}, command_encoder)
+
+        self.passes["particle_to_grid"].dispatch([self.resolution.value.x+1, self.resolution.value.y+1, 1], self.vars, command_encoder)
     
     def step(self, command_encoder:spy.CommandEncoder, dt):
         if not self.initialized:
@@ -149,6 +181,8 @@ class FluidSimulator:
             return
         
         self.step_once = False
+
+        self.vars["dt"] = self.dt.value / self.advection_iterations.value
 
         resolution = spy.uint2(self.resolution.value.x, self.resolution.value.y)
 
@@ -169,24 +203,16 @@ class FluidSimulator:
         grid_dispatch_dim = [resolution.x, resolution.y, 1]
         vel_grid_dispatch_dim = [resolution.x+1, resolution.y+1, 1]
 
-        def swap_p_grid():
-            self.vars["p_grid"], self.vars["p_grid_out"] = self.vars["p_grid_out"], self.vars["p_grid"]
-
-        def particle_to_grid():
-            self.passes["particle_to_grid_clear"].dispatch(vel_grid_dispatch_dim, self.vars, command_encoder)
-            self.passes["particle_to_grid"].dispatch(particle_dispatch_dim, self.vars, command_encoder)
-            self.passes["particle_to_grid_normalize"].dispatch(vel_grid_dispatch_dim, self.vars, command_encoder)
-        
         def pressure_projection():
             self.passes["compute_divergence"].dispatch(grid_dispatch_dim, self.vars, command_encoder)
-            swap_p_grid()
+            self.vars["p_grid"], self.vars["p_grid_out"] = self.vars["p_grid_out"], self.vars["p_grid"]
             for _ in range(self.pressure_project_iterations.value):
                 self.passes["pressure_projection"].dispatch(vel_grid_dispatch_dim, self.vars, command_encoder)
-                swap_p_grid()
+                self.vars["p_grid"], self.vars["p_grid_out"] = self.vars["p_grid_out"], self.vars["p_grid"]
             self.passes["apply_pressure_gradient"].dispatch(vel_grid_dispatch_dim, self.vars, command_encoder)
                 
         # Particle to grid transfer
-        particle_to_grid()
+        self.particle_to_grid(command_encoder)
         pressure_projection()
         
         # Fixed-point iteration for implicit trapezoidal
@@ -195,7 +221,7 @@ class FluidSimulator:
             self.passes["advect_particles"].dispatch(particle_dispatch_dim, self.vars, command_encoder)
             
             # Update grid from particles
-            particle_to_grid()
+            self.particle_to_grid(command_encoder)
             pressure_projection()
 
 class App:
@@ -336,10 +362,10 @@ class App:
 
             if is_down(self.input_state, spy.MouseButton.left) and "mouse" in self.input_state:
                 if self.drag_start is not None:
-                    uv0 = (self.drag_start - self.render_offset) / spy.float2(rect_size)
-                    uv1 = (self.input_state["mouse"] - self.render_offset) / spy.float2(rect_size)
                     if is_down(self.input_state, spy.KeyCode.left_shift):
-                        self.simulator.emit_drag(command_encoder, uv0, uv1, 30/fluid_dim.x, 1/fluid_dim.x)
+                        uv0 = (self.drag_start - self.render_offset) / spy.float2(rect_size.x, rect_size.y)
+                        uv1 = (self.input_state["mouse"] - self.render_offset) / spy.float2(rect_size.x, rect_size.y)
+                        # self.simulator.emit_drag(command_encoder, uv0, uv1, 30/fluid_dim.x, 1/fluid_dim.x)
                     else:
                         self.render_offset -= self.input_state["mouse"] - self.drag_start
                 self.drag_start = self.input_state["mouse"]

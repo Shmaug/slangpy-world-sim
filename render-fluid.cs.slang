@@ -29,22 +29,26 @@ void main(int2 pixel : SV_DispatchThreadID)
 
     float4 c = float4(0,0,0,1);
 
-    float2 duv = 1 / float2(screen_rect.zw - screen_rect.xy);
-    float2 uv = (pixel - screen_rect.xy + 0.5) * duv;
-
     if (all(pixel >= screen_rect.xy) && all(pixel < screen_rect.zw))
     {
+        float2 uv = (pixel + 0.5 - screen_rect.xy) / float2(screen_rect.zw - screen_rect.xy);
+
+        uint2 fluid_dim;
+        density.GetDimensions(fluid_dim.x, fluid_dim.y);
+        float2 cell_size = 1 / float2(fluid_dim);
+
         if (render_mode == 0)
         {
             c.rgb = viridis(saturate(density.SampleLevel(sampler, uv, 0)));
         }
         else
         {
-            float vx0 = velocity_x.SampleLevel(sampler, uv, 0);
-            float vx1 = velocity_x.SampleLevel(sampler, uv + float2(duv.x, 0), 0);
-            float vy0 = velocity_y.SampleLevel(sampler, uv, 0);
-            float vy1 = velocity_y.SampleLevel(sampler, uv + float2(0, duv.y), 0);
-            float2 v = float2(vx0 + vx1, vy0 + vy1) * 0.5;
+            float2 uv0 = float2(floor(uv * fluid_dim) / fluid_dim);
+            float vx0 = velocity_x.SampleLevel(sampler, uv0, 0);
+            float vx1 = velocity_x.SampleLevel(sampler, uv0 + float2(cell_size.x, 0), 0);
+            float vy0 = velocity_y.SampleLevel(sampler, uv0, 0);
+            float vy1 = velocity_y.SampleLevel(sampler, uv0 + float2(0, cell_size.y), 0);
+            float2 v = float2(vx0 + vx1, vy0 + vy1) * 0.5 / cell_size.x;
             float div = (vx1 - vx0) + (vy1 - vy0);
             if (render_mode == 1)
                 c.rgb = float3(v*.5+.5,1);
