@@ -5,7 +5,7 @@ Texture2D<float> velocity_x;
 Texture2D<float> velocity_y;
 SamplerState sampler;
 
-uniform uint4 screen_rect;
+uniform int4  screen_rect;
 uniform uint2 screen_size;
 uniform uint  render_mode;
 
@@ -22,17 +22,18 @@ float3 viridis(float t) {
 
 [shader("compute")]
 [numthreads(8,8,1)]
-void main(uint2 pixel : SV_DispatchThreadID)
+void main(int2 pixel : SV_DispatchThreadID)
 {
     if (any(pixel >= screen_size))
         return;
 
     float4 c = float4(0,0,0,1);
 
+    float2 duv = 1 / float2(screen_rect.zw - screen_rect.xy);
+    float2 uv = (pixel - screen_rect.xy + 0.5) * duv;
+
     if (all(pixel >= screen_rect.xy) && all(pixel < screen_rect.zw))
     {
-        float2 duv = 1 / float2(screen_rect.zw - screen_rect.xy);
-        float2 uv = (pixel - screen_rect.xy + 0.5) * duv;
         if (render_mode == 0)
         {
             c.rgb = viridis(saturate(density.SampleLevel(sampler, uv, 0)));
@@ -51,5 +52,6 @@ void main(uint2 pixel : SV_DispatchThreadID)
                 c.rgb = saturate(float3(1-exp(-3*float2(-div,div)),abs(div)));
         }
     }
+
     render_target[pixel] = c;
 }
