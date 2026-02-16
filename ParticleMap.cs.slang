@@ -6,12 +6,13 @@ uniform ParticleMap particle_map;
 [numthreads(32, 1, 1)]
 void compute_offsets(uint3 threadId: SV_DispatchThreadID)
 {
-    uint2 cell = threadId.xy;
-    if (any(cell >= particle_map.grid_size))
+    const uint cell = threadId.x + threadId.y * 4096;
+    if (cell >= particle_map.max_cells)
         return;
+
     uint i;
-    InterlockedAdd(particle_map.data_counters[1], particle_map.cell_counters[cell.y * particle_map.grid_size.x + cell.x], i);
-    particle_map.cell_data_offsets[cell.y * particle_map.grid_size.x + cell.x] = i;
+    InterlockedAdd(particle_map.counters[1], particle_map.cell_counters[cell], i);
+    particle_map.cell_offsets[cell] = i;
 }
 
 [shader("compute")]
@@ -19,10 +20,14 @@ void compute_offsets(uint3 threadId: SV_DispatchThreadID)
 void sort(uint3 threadId: SV_DispatchThreadID)
 {
     const uint index = threadId.x + threadId.y * 4096;
-    if (index >= min(particle_map.capacity, particle_map.data_counters[0]))
+    if (index >= min(particle_map.max_data, particle_map.counters[0]))
         return;
+    
     const uint2 p = particle_map.data_indices[index];
-    const uint cell = p.x;;
+    const uint cell = p.x;
     const uint index_in_cell = p.y;
-    particle_map.sorted_data[particle_map.cell_data_offsets[p.x] + index_in_cell] = particle_map.data[index];
+    const uint dst_index = particle_map.cell_offsets[cell] + index_in_cell;
+
+    particle_map.sorted_data_v[dst_index] = particle_map.data_v[index];
+    particle_map.sorted_data_d[dst_index] = particle_map.data_d[index];
 }

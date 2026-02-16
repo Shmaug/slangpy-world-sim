@@ -48,12 +48,12 @@ void main(int2 pixel : SV_DispatchThreadID)
             float vx1 = velocity_x.SampleLevel(sampler, uv0 + float2(cell_size.x, 0), 0);
             float vy0 = velocity_y.SampleLevel(sampler, uv0, 0);
             float vy1 = velocity_y.SampleLevel(sampler, uv0 + float2(0, cell_size.y), 0);
-            float2 v = float2(vx0 + vx1, vy0 + vy1) * 0.5 / cell_size.x;
-            float div = (vx1 - vx0) + (vy1 - vy0);
+            float2 v = float2(vx0 + vx1, vy0 + vy1) * 0.5;
+            float div = ((vx1 - vx0) + (vy1 - vy0));
             if (render_mode == 1)
                 c.rgb = float3(v*.5+.5,1);
             else
-                c.rgb = saturate(float3(1-exp(-3*float2(-div,div)),abs(div)));
+                c.rgb = saturate(float3(1 - exp(-float2(-div,div)), abs(div)));
         }
     }
 

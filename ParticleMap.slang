@@ -1,46 +1,50 @@
-struct ParticleMap {
-    RWStructuredBuffer<uint>  data;
-    RWStructuredBuffer<uint>  sorted_data;
-    RWStructuredBuffer<uint2> data_indices; // cell index, index in cell
-    RWStructuredBuffer<uint>  data_counters; // data size, prefix sum
-    RWStructuredBuffer<uint>  cell_data_offsets;
-    RWStructuredBuffer<uint>  cell_counters;
-    uniform int2 grid_size;
-    uniform int2 grid_offset;
-    uniform uint capacity;
+#pragma once
 
-    // get an element at an index. use getRange() to get an index range for a cell.
-    uint get(const uint i)
-    {
-        return sorted_data[i];
-    }
+struct ParticleMap
+{
+    RWStructuredBuffer<float4> data_v;
+    RWStructuredBuffer<float>  data_d;
+    RWStructuredBuffer<float4> sorted_data_v;
+    RWStructuredBuffer<float>  sorted_data_d;
+    RWStructuredBuffer<uint2>  data_indices;
+    RWStructuredBuffer<uint>   cell_counters;
+    RWStructuredBuffer<uint>   cell_offsets;
+    RWStructuredBuffer<uint>   counters;
+    uint max_cells;
+    uint max_data;
 
     // get the index range of elements in a cell
-    uint2 get_range(int2 cell)
+    uint2 get_range(const uint cell)
     {
-        cell += grid_offset;
-        if (any(cell < 0) || any(cell >= grid_size))
-            return -1;
-        const uint offset = cell_data_offsets[cell.y * grid_size.x + cell.x];
-        return uint2(offset, offset + cell_counters[cell.y * grid_size.x + cell.x]);
+        const uint offset = cell_offsets[cell];
+        return uint2(offset, offset + cell_counters[cell]);
     }
 
-    bool insert(int2 cell, const uint particle_index)
+    // get an element at an index. use getRange() to get an index range for a cell.
+    float4 get_v(const uint i)
     {
-        cell += grid_offset;
-        if (any(cell < 0) || any(cell >= grid_size))
-            return false;
-        
-        uint data_index;
-        InterlockedAdd(data_counters[0], 1, data_index);
-        if (data_index >= capacity)
-            return false;
+        return sorted_data_v[i];
+    }
+    float get_d(const uint i)
+    {
+        return sorted_data_d[i];
+    }
 
-        uint index_in_cell;
-        InterlockedAdd(cell_counters[cell.y * grid_size.x + cell.x], 1, index_in_cell);
+    bool insert(const uint cell, const float4 v, const float d)
+    {
+        uint i;
+        InterlockedAdd(counters[0], 1, i);
+        if (i >= max_data)
+        {
+            return false;
+        }
 
-        data[data_index] = particle_index;
-        data_indices[data_index] = uint2(cell.y * grid_size.x + cell.x, index_in_cell);
+        uint indexInCell;
+        InterlockedAdd(cell_counters[cell], 1, indexInCell);
+
+        data_indices[i] = uint2(cell, indexInCell);
+        data_v[i] = v;
+        data_d[i] = d;
 
         return true;
     }
