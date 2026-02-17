@@ -11,6 +11,15 @@ def is_down(input_state, key):
     return key in input_state and input_state[key]
 
 class ParticleMap:
+    def create_buffer(self, num_elements, element_size, format, label):
+        self.vars[label] = self.device.create_buffer(
+            element_count=num_elements,
+            struct_size=element_size,
+            format=format,
+            usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access,
+            label=label
+        )
+
     def __init__(self, device : spy.Device, max_elements, num_cells):
         self.device = device
         self.vars = {
@@ -18,23 +27,12 @@ class ParticleMap:
             "max_data": max_elements,
         }
 
-        def create_buffer(num_elements, element_size, format, label):
-            self.vars[label] = self.device.create_buffer(
-                element_count=num_elements,
-                struct_size=element_size,
-                format=format,
-                usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access,
-                label=label
-            )
-
-        create_buffer(max_elements, 16, spy.Format.rgba32_float, "data_v")
-        create_buffer(max_elements,  4, spy.Format.r32_float,    "data_d")
-        create_buffer(max_elements, 16, spy.Format.rgba32_float, "sorted_data_v")
-        create_buffer(max_elements,  4, spy.Format.r32_float,    "sorted_data_d")
-        create_buffer(max_elements,  8, spy.Format.rg32_uint,    "data_indices")
-        create_buffer(num_cells,     4, spy.Format.r32_uint,     "cell_counters")
-        create_buffer(num_cells,     4, spy.Format.r32_uint,     "cell_offsets")
-        create_buffer(2,             4, spy.Format.r32_uint,     "counters")
+        self.create_buffer(max_elements, 16, spy.Format.rgba32_float, "data")
+        self.create_buffer(max_elements, 16, spy.Format.rgba32_float, "sorted_data")
+        self.create_buffer(max_elements,  8, spy.Format.rg32_uint,    "data_indices")
+        self.create_buffer(num_cells,     4, spy.Format.r32_uint,     "cell_counters")
+        self.create_buffer(num_cells,     4, spy.Format.r32_uint,     "cell_offsets")
+        self.create_buffer(2,             4, spy.Format.r32_uint,     "counters")
 
         self.compute_offsets_pass = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["compute_offsets"]))
         self.sort_pass            = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["sort"]))
@@ -56,9 +54,9 @@ class FluidSimulator:
         self.vars = {}
         
         self.passes = {
-            entry: self.device.create_compute_kernel(self.device.load_program("coflip.cs.slang", [entry]))
+            entry: self.device.create_compute_kernel(self.device.load_program("fluid-sim.cs.slang", [entry]))
             for entry in [
-                "init",
+                "emit_vortex",
                 "emit_smoke",
                 "advect",
                 "particle_to_grid",
@@ -87,7 +85,13 @@ class FluidSimulator:
         self.pressure_project_iterations = spy.ui.DragInt(window,   "Pressure projection iterations", value=50, min=1)
         self.dt                          = spy.ui.DragFloat(window, "dt", value=0.1, min=0)
         self.smoke                       = spy.ui.CheckBox(window,  "Smoke")
+        
+        self.volume = spy.ui.Text(window, "Avg density: 0")
     
+    def get_density(self):    return self.vars["density_grid"]
+    def get_velocity_x(self): return self.vars["u_grid"]
+    def get_velocity_y(self): return self.vars["v_grid"]
+
     def initialize(self, command_encoder:spy.CommandEncoder):
         u_grid = self.device.create_texture(
             format=spy.Format.r32_float,
@@ -107,36 +111,42 @@ class FluidSimulator:
             format=spy.Format.r32_float,
             width=self.resolution.value.x,
             height=self.resolution.value.y,
+            mip_count=spy.ALL_MIPS if label == "density_grid" else 1,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
             label=label,
         ) for label in ["density_grid", "divergence", "p_grid", "p_grid_out"]]
 
-        self.particle_map = ParticleMap(self.device, self.resolution.value.x*self.resolution.value.y*5*5, (self.resolution.value.x+1)*(self.resolution.value.y+1))
-        
+        self.particle_map = ParticleMap(self.device, 25*(self.resolution.value.x+1)*(self.resolution.value.y+1), (self.resolution.value.x+1)*(self.resolution.value.y+1))
+        self.avg_density = self.device.create_buffer(element_count=1, struct_size=4, format=spy.Format.r32_float, memory_type=spy.MemoryType.read_back, usage=spy.BufferUsage.copy_destination)
+
         self.vars={
             "density_grid": density_grid,
-            "u_grid":     u_grid,
-            "v_grid":     v_grid,
-            "divergence": divergence,
-            "p_grid":     p_grid,
-            "p_grid_out": p_grid_out,
-            "resolution": self.resolution.value,
+            "u_grid":       u_grid,
+            "v_grid":       v_grid,
+            "divergence":   divergence,
+            "p_grid":       p_grid,
+            "p_grid_out":   p_grid_out,
+            "resolution":   self.resolution.value,
+            "dt":           self.dt.value,
+            "init_seed":    1234,
             "particle_map": self.particle_map.vars,
-            "dt": self.dt.value,
-            "init_seed": 1234
         }
 
-        self.passes["init"].dispatch([self.resolution.value.x, self.resolution.value.y, 1], self.vars, command_encoder)
-
+        command_encoder.clear_texture_float(u_grid)
+        command_encoder.clear_texture_float(v_grid)
+        command_encoder.clear_texture_float(density_grid)
+        self.passes["emit_vortex"].dispatch([self.resolution.value.x, self.resolution.value.y, 1], self.vars, command_encoder)
+        
         self.initialized = True
-
-    def get_density(self):    return self.vars["density_grid"]
-    def get_velocity_x(self): return self.vars["u_grid"]
-    def get_velocity_y(self): return self.vars["v_grid"]
 
     def step(self, command_encoder:spy.CommandEncoder, dt):
         if not self.initialized:
             self.initialize(command_encoder)
+
+        density : spy.Texture = self.vars["density_grid"]
+        command_encoder.generate_mips(density)
+        command_encoder.copy_texture_to_buffer(self.avg_density, 0, 4, 256, density, 0, density.mip_count-1, [0,0,0], [1,1,1])
+        self.volume.text = f"Avg density: {self.avg_density.to_numpy()[0]}"
 
         if not self.enabled and not self.step_once:
             return
@@ -173,7 +183,7 @@ class App:
     def __init__(self):
         super().__init__()
         self.device = spy.create_device(
-            # type=spy.DeviceType.vulkan,
+            type=spy.DeviceType.vulkan,
             include_paths=[os.path.abspath(os.path.dirname(__file__)), os.path.abspath("src")],
         )
         self.window = spy.Window(width=1400, height=(1400*9)//16, title="App", resizable=True)
@@ -201,7 +211,11 @@ class App:
 
         self.render_shader = self.device.create_compute_kernel(self.device.load_program("render-fluid.cs.slang", ["main"]))
 
-        self.linear_sampler = self.device.create_sampler()
+        self.nearest_sampler = self.device.create_sampler(
+            min_filter=spy.TextureFilteringMode.point,
+            mag_filter=spy.TextureFilteringMode.point,
+            mip_filter=spy.TextureFilteringMode.point,
+        )
 
         self.setup_ui()
         
@@ -293,7 +307,7 @@ class App:
                     "density":    self.simulator.get_density(),
                     "velocity_x": self.simulator.get_velocity_x(),
                     "velocity_y": self.simulator.get_velocity_y(),
-                    "sampler": self.linear_sampler,
+                    "sampler": self.nearest_sampler,
                     "screen_rect": spy.int4(rect_pos, rect_pos + rect_size),
                     "screen_size": screen_size,
                     "render_mode": self.render_mode.value

@@ -28,6 +28,5 @@ void sort(uint3 threadId: SV_DispatchThreadID)
     const uint index_in_cell = p.y;
     const uint dst_index = particle_map.cell_offsets[cell] + index_in_cell;
 
-    particle_map.sorted_data_v[dst_index] = particle_map.data_v[index];
-    particle_map.sorted_data_d[dst_index] = particle_map.data_d[index];
+    particle_map.sorted_data[dst_index] = particle_map.data[index];
 }

@@ -21,6 +21,11 @@ static const float M_SQRT3   = 1.732050807568877293527; // sqrt(3)
 static const float M_SQRTPI  = 1.77245385090551602730;  // sqrt(pi)
 static const float M_1_SQRT2 = 0.707106781186547524401; // 1/sqrt(2)
 
+float safe_divide(float a, float b)
+{
+    return abs(b) > 0 ? a / b : 0;
+}
+
 float sqr(float a)
 {
     return a * a;
