@@ -2,46 +2,55 @@ import Math;
 import RNG;
 import ParticleMap;
 
-RWTexture2D<float> density_grid;
+struct Particle {
+    float2 pos;
+    float2 vel;
+};
+
+RWStructuredBuffer<Particle> particle_buffer;
+
 RWTexture2D<float> u_grid;
 RWTexture2D<float> v_grid;
 
+RWTexture2D<float> density_grid;
 RWTexture2D<float> divergence;
 Texture2D<float>   p_grid;
 RWTexture2D<float> p_grid_out;
 
 uniform uint2 resolution;
+uniform uint  num_particles;
 uniform float dt;
 uniform uint  init_seed;
 
 uniform ParticleMap particle_map;
 
 [Differentiable]
-float2 interpolate_velocity(const float2 pos) {
+float2 interpolate_velocity(const float2 particle_pos) {
     float2 vel = 0;
 
-    int2 p0 = int2(floor(pos));
-    
-    for (int di = -2; di <= 2; di++)
-    {
-        for (int dj = -2; dj <= 2; dj++)
-        {
-            int2 cell = p0 + int2(di, dj);
-            if (cell.x >= 0 && cell.y >= 0)
-            {
-                if (cell.x < resolution.x + 1 && cell.y < resolution.y)
-                {
-                    float wx = bspline(pos.x - cell.x);
-                    float wy = bspline(pos.y - (cell.y+.5));
-                    vel.x += u_grid[cell] * wx * wy;
-                }
+    float2 pos = particle_pos * resolution;
 
-                if (cell.x < resolution.x && cell.y < resolution.y + 1)
-                {
-                    float wx = bspline(pos.x - (cell.x+.5));
-                    float wy = bspline(pos.y - cell.y);
-                    vel.y += v_grid[cell] * wx * wy;
-                }
+    int2 p0 = max(0, int2(floor(pos - 2)));
+    int2 p1 = min(resolution, int2(ceil(pos + 2)));
+    
+    [MaxIters(5)]
+    for (int x = p0.x; x <= p1.x; x++)
+    {
+        [MaxIters(5)]
+        for (int y = p0.y; y <= p1.y; y++)
+        {
+            if (y < resolution.y)
+            {
+                float wx = bspline(pos.x - x);
+                float wy = bspline(pos.y - (y + .5));
+                vel.x += u_grid[int2(x, y)] * wx * wy;
+            }
+
+            if (x < resolution.x)
+            {
+                float wx = bspline(pos.x - (x+.5));
+                float wy = bspline(pos.y - y);
+                vel.y += v_grid[int2(x, y)] * wx * wy;
             }
         }
     }
@@ -62,157 +71,99 @@ float2 interpolate_velocity_gradient(float2 pos, out float2x2 grad)
     return interpolate_velocity(pos);
 }
 
-void integrate_velocity_rk4(inout    float2 pos, inout float2 velocity)
-{
-    // https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods
-
-    // Impulse evolution: du/dt = -(∇v)ᵀ u
-    float2x2 grad;
-
-    float2 k1 = interpolate_velocity_gradient(pos, grad);
-    float2 k1_vel = -mul(grad, velocity);
-
-    float2 k2 = interpolate_velocity_gradient(pos + k1 * dt / 2.0, grad);
-    float2 k2_vel = -mul(grad, velocity + k1_vel * dt / 2.0);
-
-    float2 k3 = interpolate_velocity_gradient(pos + k2 * dt / 2.0, grad);
-    float2 k3_vel = -mul(grad, velocity + k2_vel * dt/ 2.0);
-
-    float2 k4 = interpolate_velocity_gradient(pos + k3 * dt, grad);
-    float2 k4_vel = -mul(grad, velocity + k3_vel * dt);
-
-    pos += (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4);
-    velocity += (dt / 6.0) * (k1_vel + 2 * k2_vel + 2 * k3_vel + k4_vel);
-
-}
-
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(32, 1, 1)]
 void emit_vortex(uint3 thread: SV_DispatchThreadID)
 {
-    uint2 cell = thread.xy;
+    uint particle_index = thread.y * 4096 + thread.x;
+    if (particle_index >= num_particles)
+        return;
 
     static const float2 center0 = float2(resolution.x * .3, resolution.y * .5);
-    static const float  radius0 = resolution.x*0.2;
-
     static const float2 center1 = float2(resolution.x * .7, resolution.y * .5);
-    static const float  radius1 = resolution.x*0.2;
+    static const float  radius = resolution.x*0.2;
 
-    float2 vx = 0;
-    float2 vy = 0;
-    float density = 0;
+    RNG rng = RNG(pcg(particle_index + pcg(init_seed)));
+    bool left = rng.nextFloat() < 0.5;
+    float theta = rng.nextFloat() * M_2PI;
+    float2 s = float2(cos(theta), sin(theta)) * sqrt(rng.nextFloat());
 
-    float2 px0 = (cell + float2(0, 0.5) - center0);
-    float2 py0 = (cell + float2(0.5, 0) - center0);
-    vx += 10 * float2(-px0.y, px0.x) / max(resolution.x, resolution.y);
-    vy += 10 * float2(-py0.y, py0.x) / max(resolution.x, resolution.y);
-    if (length(cell + 0.5 - center0) < radius0)
-        density = 1;
+    Particle p;
+    p.pos = (select(left, center0, center1) + s * radius + 0.5) / resolution;
+    p.vel = float2(-s.y, s.x) * 0.25;//select(left, -0.25, 0.25);
+    particle_buffer[particle_index] = p;
 
-    float2 px1 = (cell + float2(0, 0.5) - center1);
-    float2 py1 = (cell + float2(0.5, 0) - center1);
-    vx -= 10 * float2(-px1.y, px1.x) / max(resolution.x, resolution.y);
-    vy -= 10 * float2(-py1.y, py1.x) / max(resolution.x, resolution.y);
-    if (length(cell + 0.5 - center1) < radius1)
-        density = 1;
-
-    if (cell.y < resolution.y && cell.x < resolution.x+1)
-        u_grid[cell] = cell.x > 0 && cell.x < resolution.x ? vx.x : 0;
-    if (cell.x < resolution.x && cell.y < resolution.y+1)
-        v_grid[cell] = cell.y > 0 && cell.y < resolution.y ? vy.y : 0;
-    if (all(cell < resolution))
-        density_grid[cell] = density;
+    int2 cell = int2(floor(p.pos * resolution));
+    particle_map.insert(cell.y * resolution.x + cell.x, particle_index);
 }
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(32, 1, 1)]
 void emit_smoke(uint3 thread: SV_DispatchThreadID)
 {
-    uint2 cell = thread.xy;
+    uint particle_index = thread.y * 4096 + thread.x;
+    if (particle_index >= num_particles)
+        return;
 
     static const uint4 box = uint4(resolution.x / 4, (resolution.y * 7) / 8, (resolution.x * 3) / 4, resolution.y);
 
-    if (all(cell >= box.xy) && all(cell < box.zw))
-    {
-        v_grid[cell] = -10;
-        density_grid[cell] = 1;
-    }
+    RNG rng = RNG(pcg(particle_index + pcg(init_seed)));
+    Particle p;
+    p.pos = lerp(box.xy, box.zw, float2(rng.nextFloat(), rng.nextFloat())) / resolution;
+    p.vel = float2(0, -10);
+    particle_buffer[particle_index];
+
+    int2 cell = int2(floor(p.pos * resolution));
+    particle_map.insert(cell.y * resolution.x + cell.x, particle_index);
 }
 
 [shader("compute")]
-[numthreads(8, 8, 1)]
+[numthreads(32, 1, 1)]
 void advect(uint3 thread : SV_DispatchThreadID)
 {
-    uint2 cell = thread.xy;
-    if (any(cell >= resolution))
+    uint particle_index = thread.y*4096 + thread.x;
+    if (particle_index >= num_particles)
         return;
 
-    float2 pos = cell + 0.5;
-    float2 vel = interpolate_velocity(pos);
+    Particle particle = particle_buffer[particle_index];
+    particle.vel = interpolate_velocity(particle.pos);
 
-    integrate_velocity_rk4(pos, vel);
-
-    if (pos.x < 0)             { pos.x =                 -pos.x; vel.x *= -1; }
-    if (pos.x >= resolution.x) { pos.x = 2*resolution.x - pos.x; vel.x *= -1; }
-    if (pos.y < 0)             { pos.y =                 -pos.y; vel.y *= -1; }
-    if (pos.y >= resolution.y) { pos.y = 2*resolution.y - pos.y; vel.y *= -1; }
-
-    int2 p0 = (int2)floor(pos);
-
-    // calculate density normalization factor
-    float d_norm = 0;
-    float u_norm = 0;
-    float v_norm = 0;
-    for (int x = -2; x < 2; x++)
+    #if 0
     {
-        for (int y = -2; y < 2; y++)
-        {
-            int2 p = p0 + int2(x, y);
+        // https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods
 
-            float wcx = bspline(pos.x - (p.x + 0.5));
-            float wcy = bspline(pos.y - (p.y + 0.5));
-            float wx  = bspline(pos.x - p.x);
-            float wy  = bspline(pos.y - p.y);
+        // Impulse evolution: du/dt = -(∇v)ᵀ u
+        float2x2 grad;
 
-            if (all(p >= 0) && p.x < resolution.x + 1 && p.y < resolution.y)
-                u_norm += wx * wcy;
-            if (all(p >= 0) && p.x < resolution.x && p.y < resolution.y + 1)
-                v_norm += wy * wcx;
-            if (all(p >= 0) && all(p < resolution))
-                d_norm += wcx * wcy;
-        }
+        float2 k1 = interpolate_velocity_gradient(particle.pos, grad);
+        float2 k1_vel = -mul(grad, particle.vel);
+
+        float2 k2 = interpolate_velocity_gradient(particle.pos + k1 * dt / 2.0, grad);
+        float2 k2_vel = -mul(grad, particle.vel + k1_vel * dt / 2.0);
+
+        float2 k3 = interpolate_velocity_gradient(particle.pos + k2 * dt / 2.0, grad);
+        float2 k3_vel = -mul(grad, particle.vel + k2_vel * dt / 2.0);
+
+        float2 k4 = interpolate_velocity_gradient(particle.pos + k3 * dt, grad);
+        float2 k4_vel = -mul(grad, particle.vel + k3_vel * dt);
+
+        particle.pos += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4);
+        particle.vel += (dt / 6.0) * (k1_vel + 2 * k2_vel + 2 * k3_vel + k4_vel);
     }
-    d_norm = safe_divide(1, d_norm);
-    u_norm = safe_divide(1, u_norm);
-    v_norm = safe_divide(1, v_norm);
+    #else
+    particle.pos += particle.vel * dt;
+    #endif
 
-    float density = density_grid[cell];
+    if (particle.pos.x <  0) { particle.pos.x =    -particle.pos.x; particle.vel.x *= -1; }
+    if (particle.pos.x >= 1) { particle.pos.x = 2 - particle.pos.x; particle.vel.x *= -1; }
+    if (particle.pos.y <  0) { particle.pos.y =    -particle.pos.y; particle.vel.y *= -1; }
+    if (particle.pos.y >= 1) { particle.pos.y = 2 - particle.pos.y; particle.vel.y *= -1; }
 
-    for (int x = -2; x < 2; x++)
-    {
-        for (int y = -2; y < 2; y++)
-        {
-            int2 p = p0 + int2(x, y);
+    particle_buffer[particle_index] = particle;
 
-            float wcx = bspline(pos.x - (p.x + 0.5));
-            float wcy = bspline(pos.y - (p.y + 0.5));
-            float wx  = bspline(pos.x - p.x);
-            float wy  = bspline(pos.y - p.y);
+    int2 cell = clamp(int2(floor(particle.pos * resolution)), 0, resolution - 1);
 
-            if (all(p >= 0) && all(p < resolution+1))
-            {
-                particle_map.insert(
-                    p.y * (resolution.x + 1) + p.x,
-                    float4(
-                        vel.x * wx * wcy * u_norm,
-                        vel.y * wy * wcx * v_norm,
-                        density * wcx * wcy * d_norm,
-                        1),
-                    
-                );
-            }
-        }
-    }
+    particle_map.insert(cell.y * resolution.x + cell.x, particle_index);
 }
 
 [shader("compute")]
@@ -225,36 +176,47 @@ void particle_to_grid(uint3 thread: SV_DispatchThreadID)
 
     float density_sum = 0;
     float u_sum = 0;
+    float u_weight = 0;
     float v_sum = 0;
+    float v_weight = 0;
 
-    uint2 range = particle_map.get_range(cell.y * (resolution.x+1) + cell.x);
-    for (int j = range.x; j < range.y; j++)
+    int2 p0 = max(0, cell - 2);
+    int2 p1 = min(resolution-1, cell+2);
+
+    for (int x = p0.x; x <= p1.x; x++)
     {
-        float4 v = particle_map.get(j);
+        for (int y = p0.y; y <= p1.y; y++)
+        {
+            uint2 range = particle_map.get_range(y * resolution.x + x);
+            for (int j = range.x; j < range.y; j++)
+            {
+                Particle p = particle_buffer[particle_map.get(j)];
+                float2 pos = p.pos * resolution;
 
-        if (all(cell < resolution))
-        {
-            density_sum += v.z;
-        }
+                float wx = bspline(pos.x - cell.x);
+                float wy = bspline(pos.y - cell.y);
+                float wcx = bspline(pos.x - (cell.x + .5));
+                float wcy = bspline(pos.y - (cell.y + .5));
 
-        if (cell.y < resolution.y)
-        {
-            u_sum += v.x;
-        }
-        if (cell.x < resolution.x)
-        {
-            v_sum += v.y;
+                density_sum += 4.0 * wcx * wcy;
+
+                u_sum += p.vel.x * wx * wcy;
+                u_weight += wx * wcy;
+
+                v_sum += p.vel.y * wcx * wy;
+                v_weight += wcx * wy;
+            }
         }
     }
 
     if (all(cell < resolution)) {
         density_grid[cell] = density_sum;
     }
-    if (cell.x < resolution.x+1 && cell.y < resolution.y) {
-        u_grid[cell] = cell.x > 0 && cell.x < resolution.x ? u_sum : 0;
+    if (cell.y < resolution.y) {
+        u_grid[cell] = cell.x > 0 && cell.x < resolution.x ? safe_divide(u_sum, u_weight) : 0;
     }
-    if (cell.x < resolution.x && cell.y < resolution.y+1) {
-        v_grid[cell] = cell.y > 0 && cell.y < resolution.y ? v_sum : 0;
+    if (cell.x < resolution.x) {
+        v_grid[cell] = cell.y > 0 && cell.y < resolution.y ? safe_divide(v_sum, v_weight) : 0;
     }
 }
 

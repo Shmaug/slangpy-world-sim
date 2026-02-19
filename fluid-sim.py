@@ -27,12 +27,12 @@ class ParticleMap:
             "max_data": max_elements,
         }
 
-        self.create_buffer(max_elements, 16, spy.Format.rgba32_float, "data")
-        self.create_buffer(max_elements, 16, spy.Format.rgba32_float, "sorted_data")
-        self.create_buffer(max_elements,  8, spy.Format.rg32_uint,    "data_indices")
-        self.create_buffer(num_cells,     4, spy.Format.r32_uint,     "cell_counters")
-        self.create_buffer(num_cells,     4, spy.Format.r32_uint,     "cell_offsets")
-        self.create_buffer(2,             4, spy.Format.r32_uint,     "counters")
+        self.create_buffer(max_elements, 4, spy.Format.r32_uint,  "data")
+        self.create_buffer(max_elements, 4, spy.Format.r32_uint,  "sorted_data")
+        self.create_buffer(max_elements, 8, spy.Format.rg32_uint, "data_indices")
+        self.create_buffer(num_cells,    4, spy.Format.r32_uint,  "cell_counters")
+        self.create_buffer(num_cells,    4, spy.Format.r32_uint,  "cell_offsets")
+        self.create_buffer(2,            4, spy.Format.r32_uint,  "counters")
 
         self.compute_offsets_pass = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["compute_offsets"]))
         self.sort_pass            = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["sort"]))
@@ -83,6 +83,7 @@ class FluidSimulator:
         self.resolution                  = spy.ui.DragInt2(window,  "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
         self.advection_iterations        = spy.ui.DragInt(window,   "Advection iterations", value=3, min=1)
         self.pressure_project_iterations = spy.ui.DragInt(window,   "Pressure projection iterations", value=50, min=1)
+        self.num_particles               = spy.ui.DragInt(window,   "Particle count", value=1000, min=1)
         self.dt                          = spy.ui.DragFloat(window, "dt", value=0.1, min=0)
         self.smoke                       = spy.ui.CheckBox(window,  "Smoke")
         
@@ -116,26 +117,38 @@ class FluidSimulator:
             label=label,
         ) for label in ["density_grid", "divergence", "p_grid", "p_grid_out"]]
 
-        self.particle_map = ParticleMap(self.device, 25*(self.resolution.value.x+1)*(self.resolution.value.y+1), (self.resolution.value.x+1)*(self.resolution.value.y+1))
+        particle_buffer = self.device.create_buffer(
+            element_count=self.num_particles.value,
+            struct_size=16,
+            usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access,
+            label="particle_buffer"
+        )
+
+        self.particle_map = ParticleMap(self.device, self.num_particles.value, self.resolution.value.x*self.resolution.value.y)
         self.avg_density = self.device.create_buffer(element_count=1, struct_size=4, format=spy.Format.r32_float, memory_type=spy.MemoryType.read_back, usage=spy.BufferUsage.copy_destination)
 
         self.vars={
-            "density_grid": density_grid,
-            "u_grid":       u_grid,
-            "v_grid":       v_grid,
-            "divergence":   divergence,
-            "p_grid":       p_grid,
-            "p_grid_out":   p_grid_out,
-            "resolution":   self.resolution.value,
-            "dt":           self.dt.value,
-            "init_seed":    1234,
-            "particle_map": self.particle_map.vars,
+            "particle_buffer": particle_buffer,
+            "density_grid":    density_grid,
+            "u_grid":          u_grid,
+            "v_grid":          v_grid,
+            "divergence":      divergence,
+            "p_grid":          p_grid,
+            "p_grid_out":      p_grid_out,
+            "resolution":      self.resolution.value,
+            "num_particles":   self.num_particles.value,
+            "dt":              self.dt.value,
+            "init_seed":       1234,
+            "particle_map":    self.particle_map.vars,
         }
 
-        command_encoder.clear_texture_float(u_grid)
-        command_encoder.clear_texture_float(v_grid)
-        command_encoder.clear_texture_float(density_grid)
-        self.passes["emit_vortex"].dispatch([self.resolution.value.x, self.resolution.value.y, 1], self.vars, command_encoder)
+        self.particle_dispatch_dim = [4096, (self.num_particles.value + 4095) // 4096, 1]
+        self.mac_grid_dispatch_dim = [self.resolution.value.x+1, self.resolution.value.y+1, 1]
+
+        self.particle_map.clear(command_encoder)
+        self.passes["emit_vortex"].dispatch(self.particle_dispatch_dim, self.vars, command_encoder)
+        self.particle_map.sort(command_encoder)
+        self.passes["particle_to_grid"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
         
         self.initialized = True
 
@@ -157,27 +170,25 @@ class FluidSimulator:
 
         resolution = spy.uint2(self.resolution.value.x, self.resolution.value.y)
         grid_dispatch_dim = [resolution.x, resolution.y, 1]
-        vel_grid_dispatch_dim = [resolution.x+1, resolution.y+1, 1]
 
         if self.smoke.value:
-            self.passes["emit_smoke"].dispatch(grid_dispatch_dim, self.vars, command_encoder)
+            self.passes["emit_smoke"].dispatch(self.particle_dispatch_dim, self.vars, command_encoder)
 
-        # Fixed-point iteration for implicit trapezoidal
         for iter in range(self.advection_iterations.value):
             # Advection
             self.particle_map.clear(command_encoder)
-            self.passes["advect"].dispatch(grid_dispatch_dim, self.vars, command_encoder)
+            self.passes["advect"].dispatch(self.particle_dispatch_dim, self.vars, command_encoder)
             self.particle_map.sort(command_encoder)
-            self.passes["particle_to_grid"].dispatch(vel_grid_dispatch_dim, self.vars, command_encoder)
+            self.passes["particle_to_grid"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
 
             # Pressure projection
             if self.pressure_project_iterations.value > 0:
                 self.passes["compute_divergence"].dispatch(grid_dispatch_dim, self.vars, command_encoder)
                 self.vars["p_grid"], self.vars["p_grid_out"] = self.vars["p_grid_out"], self.vars["p_grid"]
                 for _ in range(self.pressure_project_iterations.value):
-                    self.passes["pressure_projection"].dispatch(vel_grid_dispatch_dim, self.vars, command_encoder)
+                    self.passes["pressure_projection"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
                     self.vars["p_grid"], self.vars["p_grid_out"] = self.vars["p_grid_out"], self.vars["p_grid"]
-                self.passes["apply_pressure_gradient"].dispatch(vel_grid_dispatch_dim, self.vars, command_encoder)
+                self.passes["apply_pressure_gradient"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
 
 class App:
     def __init__(self):

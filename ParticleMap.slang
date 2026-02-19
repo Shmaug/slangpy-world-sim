@@ -2,12 +2,12 @@
 
 struct ParticleMap
 {
-    RWStructuredBuffer<float4> data;
-    RWStructuredBuffer<float4> sorted_data;
-    RWStructuredBuffer<uint2>  data_indices;
-    RWStructuredBuffer<uint>   cell_counters;
-    RWStructuredBuffer<uint>   cell_offsets;
-    RWStructuredBuffer<uint>   counters;
+    RWStructuredBuffer<uint>  data;
+    RWStructuredBuffer<uint>  sorted_data;
+    RWStructuredBuffer<uint2> data_indices;
+    RWStructuredBuffer<uint>  cell_counters;
+    RWStructuredBuffer<uint>  cell_offsets;
+    RWStructuredBuffer<uint>  counters;
     uint max_cells;
     uint max_data;
 
@@ -19,12 +19,12 @@ struct ParticleMap
     }
 
     // get an element at an index. use getRange() to get an index range for a cell.
-    float4 get(const uint i)
+    uint get(const uint i)
     {
         return sorted_data[i];
     }
 
-    bool insert(const uint cell, const float4 v)
+    bool insert(const uint cell, const uint particle_index)
     {
         uint i;
         InterlockedAdd(counters[0], 1, i);
@@ -37,7 +37,7 @@ struct ParticleMap
         InterlockedAdd(cell_counters[cell], 1, indexInCell);
 
         data_indices[i] = uint2(cell, indexInCell);
-        data[i] = v;
+        data[i] = particle_index;
 
         return true;
     }

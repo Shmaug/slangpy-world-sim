@@ -51,7 +51,7 @@ void main(int2 pixel : SV_DispatchThreadID)
             float2 v = float2(vx0 + vx1, vy0 + vy1) * 0.5;
             float div = ((vx1 - vx0) + (vy1 - vy0));
             if (render_mode == 1)
-                c.rgb = float3(v*.5+.5,1);
+                c.rgb = float3(100*v*.5+.5,1);
             else
                 c.rgb = saturate(float3(1 - exp(-float2(-div,div)), abs(div)));
         }
