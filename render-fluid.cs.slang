@@ -1,9 +1,8 @@
-RWTexture2D<float4> render_target;
+import FluidGrid;
 
-Texture2D<float> density;
-Texture2D<float> velocity_x;
-Texture2D<float> velocity_y;
-SamplerState sampler;
+uniform FluidGrid grid;
+
+RWTexture2D<float4> render_target;
 
 uniform int4  screen_rect;
 uniform uint2 screen_size;
@@ -29,31 +28,29 @@ void main(int2 pixel : SV_DispatchThreadID)
 
     float4 c = float4(0,0,0,1);
 
-    if (all(pixel >= screen_rect.xy) && all(pixel < screen_rect.zw))
+    float2 uv = (pixel + 0.5 - screen_rect.xy) / float2(screen_rect.zw - screen_rect.xy);
+    float2 grid_pos = uv * grid.resolution;
+    if (all(grid_pos >= 0) && all(grid_pos < grid.resolution))
     {
-        float2 uv = (pixel + 0.5 - screen_rect.xy) / float2(screen_rect.zw - screen_rect.xy);
-
-        uint2 fluid_dim;
-        density.GetDimensions(fluid_dim.x, fluid_dim.y);
-        float2 cell_size = 1 / float2(fluid_dim);
-
         if (render_mode == 0)
         {
-            c.rgb = viridis(saturate(density.SampleLevel(sampler, uv, 0)));
+            c.rgb = viridis(saturate(grid.sample_pressure(grid_pos)));
         }
-        else
+        else if (render_mode == 1)
         {
-            float2 uv0 = float2(floor(uv * fluid_dim) / fluid_dim);
-            float vx0 = velocity_x.SampleLevel(sampler, uv0, 0);
-            float vx1 = velocity_x.SampleLevel(sampler, uv0 + float2(cell_size.x, 0), 0);
-            float vy0 = velocity_y.SampleLevel(sampler, uv0, 0);
-            float vy1 = velocity_y.SampleLevel(sampler, uv0 + float2(0, cell_size.y), 0);
-            float2 v = float2(vx0 + vx1, vy0 + vy1) * 0.5;
-            float div = ((vx1 - vx0) + (vy1 - vy0));
-            if (render_mode == 1)
-                c.rgb = float3(100*v*.5+.5,1);
-            else
-                c.rgb = saturate(float3(1 - exp(-float2(-div,div)), abs(div)));
+            float2 vel = grid.sample_velocity(grid_pos);
+            c.rgb = float3(100 * (vel / grid.resolution) * .5 + .5, 1);
+        }
+        else if (render_mode == 2)
+        {
+            int2 cell = int2(floor(grid_pos));
+            float vel_x0 = grid.velocity_x[cell];
+            float vel_x1 = grid.velocity_x[cell + uint2(1,0)];
+            float vel_y0 = grid.velocity_y[cell];
+            float vel_y1 = grid.velocity_y[cell + uint2(0,1)];
+
+            float div = (vel_x1 - vel_x0) + (vel_y1 - vel_y0);
+            c.rgb = saturate(float3(-div, div, 0) / max(grid.resolution.x, grid.resolution.y));
         }
     }
 

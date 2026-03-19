@@ -4,46 +4,14 @@ import numpy as np
 
 COLOR_FORMAT = spy.Format.rgba32_float
 
+INIT_NONE = 0
+INIT_VORTEX = 1
+
 def get_asset_path(asset):
     return os.path.join(os.path.dirname(__file__), asset)
 
 def is_down(input_state, key):
     return key in input_state and input_state[key]
-
-class ParticleMap:
-    def create_buffer(self, num_elements, element_size, format, label):
-        self.vars[label] = self.device.create_buffer(
-            element_count=num_elements,
-            struct_size=element_size,
-            format=format,
-            usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access,
-            label=label
-        )
-
-    def __init__(self, device : spy.Device, max_elements, num_cells):
-        self.device = device
-        self.vars = {
-            "max_cells": num_cells,
-            "max_data": max_elements,
-        }
-
-        self.create_buffer(max_elements, 4, spy.Format.r32_uint,  "data")
-        self.create_buffer(max_elements, 4, spy.Format.r32_uint,  "sorted_data")
-        self.create_buffer(max_elements, 8, spy.Format.rg32_uint, "data_indices")
-        self.create_buffer(num_cells,    4, spy.Format.r32_uint,  "cell_counters")
-        self.create_buffer(num_cells,    4, spy.Format.r32_uint,  "cell_offsets")
-        self.create_buffer(2,            4, spy.Format.r32_uint,  "counters")
-
-        self.compute_offsets_pass = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["compute_offsets"]))
-        self.sort_pass            = self.device.create_compute_kernel(self.device.load_program("ParticleMap.cs.slang", ["sort"]))
-
-    def clear(self, command_encoder : spy.CommandEncoder):
-        command_encoder.clear_buffer(self.vars["counters"])
-        command_encoder.clear_buffer(self.vars["cell_counters"])
-
-    def sort(self, command_encoder : spy.CommandEncoder):
-        self.compute_offsets_pass.dispatch([4096, (self.vars["max_cells"] + 4095) // 4096, 1], {"particle_map": self.vars}, command_encoder)
-        self.sort_pass           .dispatch([4096, (self.vars["max_data"]  + 4095) // 4096, 1], {"particle_map": self.vars}, command_encoder)
 
 class FluidSimulator:
     def __init__(self, device : spy.Device):
@@ -51,20 +19,8 @@ class FluidSimulator:
         self.enabled = False
         self.step_once = False
         self.initialized = False
-        self.vars = {}
-        
-        self.passes = {
-            entry: self.device.create_compute_kernel(self.device.load_program("fluid-sim.cs.slang", [entry]))
-            for entry in [
-                "emit_vortex",
-                "emit_smoke",
-                "advect",
-                "particle_to_grid",
-                "compute_divergence",
-                "pressure_projection",
-                "apply_pressure_gradient",
-            ]
-        }
+        self.grid_vars = {}
+        self.passes = {}
 
     def setup_ui(self, window):
         def toggle_callback():
@@ -80,115 +36,114 @@ class FluidSimulator:
             self.initialized = False
         spy.ui.Button(window, "Reset", callback=reset_callback)
 
+        self.init_mode = spy.ui.ComboBox(window, "Init mode", 0, reset_callback, ["None", "Vortex"])
+        self.emit_smoke = spy.ui.CheckBox(window,  "Emit smoke")
+
         self.resolution                  = spy.ui.DragInt2(window,  "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
+        self.advect_dt                   = spy.ui.DragFloat(window, "Advection dt", value=0.1, min=0)
         self.advection_iterations        = spy.ui.DragInt(window,   "Advection iterations", value=3, min=1)
         self.pressure_project_iterations = spy.ui.DragInt(window,   "Pressure projection iterations", value=50, min=1)
-        self.num_particles               = spy.ui.DragInt(window,   "Particle count", value=1000, min=1)
-        self.dt                          = spy.ui.DragFloat(window, "dt", value=0.1, min=0)
-        self.smoke                       = spy.ui.CheckBox(window,  "Smoke")
-        
-        self.volume = spy.ui.Text(window, "Avg density: 0")
+        # self.volume = spy.ui.Text(window, "Avg density: 0")
     
-    def get_density(self):    return self.vars["density_grid"]
-    def get_velocity_x(self): return self.vars["u_grid"]
-    def get_velocity_y(self): return self.vars["v_grid"]
+    def swap_grids(self):
+        for name in ["velocity_x", "velocity_y", "pressure"]:
+            name_out = f"{name}_rw"
+            self.grid_vars[name], self.grid_vars[name_out] = self.grid_vars[name_out], self.grid_vars[name]
+
+    def dispatch_pass(self, entry, dim, vars, command_encoder):
+        if entry not in self.passes:
+            self.passes[entry] = self.device.create_compute_kernel(self.device.load_program("fluid-sim.cs.slang", [entry]))
+        self.passes[entry].dispatch(dim, vars, command_encoder)
 
     def initialize(self, command_encoder:spy.CommandEncoder):
-        u_grid = self.device.create_texture(
-            format=spy.Format.r32_float,
-            width=self.resolution.value.x+1,
-            height=self.resolution.value.y,
-            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label="u_grid",
-        )
-        v_grid = self.device.create_texture(
-            format=spy.Format.r32_float,
-            width=self.resolution.value.x,
-            height=self.resolution.value.y+1,
-            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label="v_grid",
-        )
-        density_grid, divergence, p_grid, p_grid_out = [ self.device.create_texture(
-            format=spy.Format.r32_float,
-            width=self.resolution.value.x,
-            height=self.resolution.value.y,
-            mip_count=spy.ALL_MIPS if label == "density_grid" else 1,
-            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label=label,
-        ) for label in ["density_grid", "divergence", "p_grid", "p_grid_out"]]
+        def create_grid(width, height, name):
+            return self.device.create_texture(
+                format=spy.Format.r32_float,
+                width=width,
+                height=height,
+                usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+                label=name)
+        
+        w,h = self.resolution.value
 
-        particle_buffer = self.device.create_buffer(
-            element_count=self.num_particles.value,
-            struct_size=16,
-            usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access,
-            label="particle_buffer"
-        )
-
-        self.particle_map = ParticleMap(self.device, self.num_particles.value, self.resolution.value.x*self.resolution.value.y)
-        self.avg_density = self.device.create_buffer(element_count=1, struct_size=4, format=spy.Format.r32_float, memory_type=spy.MemoryType.read_back, usage=spy.BufferUsage.copy_destination)
-
-        self.vars={
-            "particle_buffer": particle_buffer,
-            "density_grid":    density_grid,
-            "u_grid":          u_grid,
-            "v_grid":          v_grid,
-            "divergence":      divergence,
-            "p_grid":          p_grid,
-            "p_grid_out":      p_grid_out,
-            "resolution":      self.resolution.value,
-            "num_particles":   self.num_particles.value,
-            "dt":              self.dt.value,
-            "init_seed":       1234,
-            "particle_map":    self.particle_map.vars,
+        self.grid_vars = {
+            "velocity_x":     create_grid(w+1, h, "velocity_x_0"),
+            "velocity_x_rw":  create_grid(w+1, h, "velocity_x_1"),
+            "velocity_y":     create_grid(w, h+1, "velocity_y_0"),
+            "velocity_y_rw":  create_grid(w, h+1, "velocity_y_1"),
+            "pressure":       create_grid(w, h, "pressure_0"),
+            "pressure_rw":    create_grid(w, h, "pressure_1"),
+            "linear_sampler": self.device.create_sampler(),
+            "resolution":     self.resolution.value,
         }
 
-        self.particle_dispatch_dim = [4096, (self.num_particles.value + 4095) // 4096, 1]
+        self.divergence            = create_grid(w, h, "divergence")
+        self.pressure_correction_0 = create_grid(w, h, "pressure_correction_0")
+        self.pressure_correction_1 = create_grid(w, h, "pressure_correction_1")
+
+        # self.avg_pressure = self.device.create_buffer(
+        #     element_count=1,
+        #     struct_size=4,
+        #     format=spy.Format.r32_float,
+        #     memory_type=spy.MemoryType.read_back,
+        #     usage=spy.BufferUsage.copy_destination
+        # )
+
+        self.grid_dispatch_dim     = [self.resolution.value.x,   self.resolution.value.y,   1]
         self.mac_grid_dispatch_dim = [self.resolution.value.x+1, self.resolution.value.y+1, 1]
 
-        self.particle_map.clear(command_encoder)
-        self.passes["emit_vortex"].dispatch(self.particle_dispatch_dim, self.vars, command_encoder)
-        self.particle_map.sort(command_encoder)
-        self.passes["particle_to_grid"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
-        
+        for name in ["velocity_x", "velocity_y", "pressure"]:
+            command_encoder.clear_texture_float(self.grid_vars[name])
+            command_encoder.clear_texture_float(self.grid_vars[f"{name}_rw"])
+    
+        if self.init_mode.value == INIT_VORTEX:
+            self.dispatch_pass("init_vortex", self.mac_grid_dispatch_dim, { "grid": self.grid_vars }, command_encoder)
+            self.pressure_project(command_encoder)
+            self.swap_grids()
+
         self.initialized = True
+
+    # must be called after updating velocities (advection), but before swapping the velocity grids
+    def pressure_project(self, command_encoder:spy.CommandEncoder):
+        if self.pressure_project_iterations.value == 0:
+            return
+        command_encoder.clear_texture_float(self.pressure_correction_0)
+        command_encoder.clear_texture_float(self.pressure_correction_1)
+        vars = {
+            "grid": self.grid_vars,
+            "dt":   self.advect_dt.value / self.advection_iterations.value,
+            "divergence":             self.divergence,
+            "pressure_correction":    self.pressure_correction_0,
+            "pressure_correction_rw": self.pressure_correction_1,
+        }
+        self.dispatch_pass("update_divergence", self.grid_dispatch_dim, vars, command_encoder)
+        for iter in range(self.pressure_project_iterations.value):
+            self.dispatch_pass("pressure_project_step", self.grid_dispatch_dim, vars, command_encoder)
+            vars["pressure_correction"], vars["pressure_correction_rw"] = vars["pressure_correction_rw"], vars["pressure_correction"]
+        self.dispatch_pass("pressure_project_apply", self.grid_dispatch_dim, vars, command_encoder)
 
     def step(self, command_encoder:spy.CommandEncoder, dt):
         if not self.initialized:
             self.initialize(command_encoder)
-
-        density : spy.Texture = self.vars["density_grid"]
-        command_encoder.generate_mips(density)
-        command_encoder.copy_texture_to_buffer(self.avg_density, 0, 4, 256, density, 0, density.mip_count-1, [0,0,0], [1,1,1])
-        self.volume.text = f"Avg density: {self.avg_density.to_numpy()[0]}"
 
         if not self.enabled and not self.step_once:
             return
         
         self.step_once = False
 
-        self.vars["dt"] = self.dt.value / max(1,self.advection_iterations.value)
-
-        resolution = spy.uint2(self.resolution.value.x, self.resolution.value.y)
-        grid_dispatch_dim = [resolution.x, resolution.y, 1]
-
-        if self.smoke.value:
-            self.passes["emit_smoke"].dispatch(self.particle_dispatch_dim, self.vars, command_encoder)
+        if self.emit_smoke.value:
+            self.dispatch_pass("emit_smoke", self.mac_grid_dispatch_dim, { "grid": self.grid_vars }, command_encoder)
+            self.pressure_project(command_encoder)
+            self.swap_grids()
 
         for iter in range(self.advection_iterations.value):
-            # Advection
-            self.particle_map.clear(command_encoder)
-            self.passes["advect"].dispatch(self.particle_dispatch_dim, self.vars, command_encoder)
-            self.particle_map.sort(command_encoder)
-            self.passes["particle_to_grid"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
+            self.dispatch_pass("advect", self.mac_grid_dispatch_dim, { "grid": self.grid_vars, "dt": self.advect_dt.value / self.advection_iterations.value }, command_encoder)
+            self.pressure_project(command_encoder)
+            self.swap_grids()
 
-            # Pressure projection
-            if self.pressure_project_iterations.value > 0:
-                self.passes["compute_divergence"].dispatch(grid_dispatch_dim, self.vars, command_encoder)
-                self.vars["p_grid"], self.vars["p_grid_out"] = self.vars["p_grid_out"], self.vars["p_grid"]
-                for _ in range(self.pressure_project_iterations.value):
-                    self.passes["pressure_projection"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
-                    self.vars["p_grid"], self.vars["p_grid_out"] = self.vars["p_grid_out"], self.vars["p_grid"]
-                self.passes["apply_pressure_gradient"].dispatch(self.mac_grid_dispatch_dim, self.vars, command_encoder)
+        # command_encoder.generate_mips(self.grid_vars["pressure"])
+        # command_encoder.copy_texture_to_buffer(self.avg_pressure, 0, 4, 256, self.grid_vars["pressure"], 0, self.grid_vars["pressure"].mip_count-1, [0,0,0], [1,1,1])
+        # self.volume.text = f"Avg pressure: {self.avg_pressure.to_numpy()[0]}"
 
 class App:
     def __init__(self):
@@ -222,12 +177,6 @@ class App:
 
         self.render_shader = self.device.create_compute_kernel(self.device.load_program("render-fluid.cs.slang", ["main"]))
 
-        self.nearest_sampler = self.device.create_sampler(
-            min_filter=spy.TextureFilteringMode.point,
-            mag_filter=spy.TextureFilteringMode.point,
-            mip_filter=spy.TextureFilteringMode.point,
-        )
-
         self.setup_ui()
         
         self.render_offset = spy.float2(0,0)
@@ -241,7 +190,7 @@ class App:
         
         self.simulator.setup_ui(spy.ui.Group(window, label="Simulation"))
 
-        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Density", "Velocity", "Divergence" ])
+        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Pressure", "Velocity", "Divergence" ])
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -301,7 +250,7 @@ class App:
                 )
 
             screen_size = spy.uint2(surface_texture.width, surface_texture.height)
-            fluid_dim = spy.int2(self.simulator.get_density().width, self.simulator.get_density().height)
+            fluid_dim = self.simulator.grid_vars["resolution"]
             rect_pos = spy.int2(
                 int(screen_size.x/2 - self.render_scale*fluid_dim.x/2 - self.render_offset.x),
                 int(screen_size.y/2 - self.render_scale*fluid_dim.y/2 - self.render_offset.y)
@@ -315,10 +264,7 @@ class App:
                 thread_count=[self.render_texture.width, self.render_texture.height, 1],
                 vars={
                     "render_target": self.render_texture,
-                    "density":    self.simulator.get_density(),
-                    "velocity_x": self.simulator.get_velocity_x(),
-                    "velocity_y": self.simulator.get_velocity_y(),
-                    "sampler": self.nearest_sampler,
+                    "grid":          self.simulator.grid_vars,
                     "screen_rect": spy.int4(rect_pos, rect_pos + rect_size),
                     "screen_size": screen_size,
                     "render_mode": self.render_mode.value

@@ -1,1 +1,0 @@
-add_executable(coflip2d coflip2d.cpp)
