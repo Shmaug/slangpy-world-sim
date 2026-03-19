@@ -75,16 +75,16 @@ void emit_smoke(uint3 thread: SV_DispatchThreadID)
 
 float2 integrate_velocity(float2 grid_pos)
 {
-    #if 0
+    #if 1
     // https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods
     float2 k1 = grid.sample_velocity(grid_pos);
     float2 k2 = grid.sample_velocity(grid_pos + k1 * dt / 2.0);
     float2 k3 = grid.sample_velocity(grid_pos + k2 * dt / 2.0);
     float2 k4 = grid.sample_velocity(grid_pos + k3 * dt);
-    grid_pos += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4);
+    grid_pos -= (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4);
     #else
     // basic Euler integration
-    grid_pos += -dt * grid.sample_velocity(grid_pos);
+    grid_pos -= dt * grid.sample_velocity(grid_pos);
     #endif
 
     grid_pos = grid_pos % grid.resolution;
