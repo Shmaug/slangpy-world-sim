@@ -157,7 +157,7 @@ class WorldRenderer:
                 "format": COLOR_FORMAT, 
                 "color": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.one, "dst_factor": spy.BlendFactor.src_alpha, "op": spy.BlendOp.add}), # transmittance blending
                 "alpha": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.one, "dst_factor": spy.BlendFactor.zero,      "op": spy.BlendOp.add}),
-                "write_mask": spy.RenderTargetWriteMask.enable_all, 
+                "write_mask": spy.RenderTargetWriteMask.all, 
                 "enable_blend": True
             })],
             depth_stencil=spy.DepthStencilDesc({
@@ -337,7 +337,6 @@ class App:
         while not self.window.should_close():
             self.input_state["scroll"] = 0
             self.window.process_events()
-            self.ui.process_events()
 
             if self.minimized:
                 continue
@@ -397,8 +396,8 @@ class App:
 
             self.camera_pos_text.text = f"Camera: {self.camera.position.x:.3f} {self.camera.position.y:.3f} {self.camera.position.z:.3f}"
             self.fps_text.text = f"FPS: {self.fps_avg:.2f}"
-            self.ui.new_frame(surface_texture.width, surface_texture.height)
-            self.ui.render(surface_texture, command_encoder)            
+            self.ui.begin_frame(surface_texture.width, surface_texture.height)
+            self.ui.end_frame(surface_texture, command_encoder)            
 
             self.device.submit_command_buffer(command_encoder.finish())
             del surface_texture
