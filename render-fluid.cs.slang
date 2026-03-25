@@ -52,15 +52,6 @@ void main(int2 pixel : SV_DispatchThreadID)
             float div = (vel_x1 - vel_x0) + (vel_y1 - vel_y0);
             c.rgb = saturate(float3(-div, div, 0) / max(grid.resolution.x, grid.resolution.y));
         }
-        else if (render_mode == 3)
-        {
-            c.rgb = viridis(saturate(grid.sample_pressure_bspline(grid_pos)));
-        }
-        else if (render_mode == 4)
-        {
-            float2 vel = grid.sample_velocity_bspline(grid_pos);
-            c.rgb = float3(100 * (vel / grid.resolution) * .5 + .5, 1);
-        }
     }
 
     render_target[pixel] = c;

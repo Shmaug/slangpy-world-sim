@@ -6,38 +6,14 @@ uniform FluidGrid grid;
 uniform ParticleMap particle_map;
 uniform float advect_dt;
 
-float2 integrate_velocity_linear(float2 grid_pos, float dt)
+float2 integrate_velocity(float2 grid_pos, float dt)
 {
-    #if 1
     // https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods
     float2 k1 = grid.sample_velocity(grid_pos);
     float2 k2 = grid.sample_velocity(grid_pos + k1 * dt / 2.0);
     float2 k3 = grid.sample_velocity(grid_pos + k2 * dt / 2.0);
     float2 k4 = grid.sample_velocity(grid_pos + k3 * dt);
     grid_pos += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4);
-    #else
-    // basic Euler integration
-    grid_pos += dt * grid.sample_velocity(grid_pos);
-    #endif
-
-    grid_pos = (grid_pos + grid.resolution) % grid.resolution;
-
-    return grid_pos;
-}
-
-float2 integrate_velocity_bspline(float2 grid_pos, float dt)
-{
-    #if 1
-    // https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods
-    float2 k1 = grid.sample_velocity_bspline(grid_pos);
-    float2 k2 = grid.sample_velocity_bspline(grid_pos + k1 * dt / 2.0);
-    float2 k3 = grid.sample_velocity_bspline(grid_pos + k2 * dt / 2.0);
-    float2 k4 = grid.sample_velocity_bspline(grid_pos + k3 * dt);
-    grid_pos += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4);
-    #else
-    // basic Euler integration
-    grid_pos += dt * grid.sample_velocity_bspline(grid_pos);
-    #endif
 
     grid_pos = (grid_pos + grid.resolution) % grid.resolution;
 
@@ -50,9 +26,9 @@ void advect_grid(uint3 thread : SV_DispatchThreadID)
 {
     uint2 cell = thread.xy;
 
-    float2 pos_x = integrate_velocity_linear(float2(cell.x,       cell.y + 0.5), -advect_dt);
-    float2 pos_y = integrate_velocity_linear(float2(cell.x + 0.5, cell.y),       -advect_dt);
-    float2 pos_c = integrate_velocity_linear(float2(cell.x + 0.5, cell.y + 0.5), -advect_dt);
+    float2 pos_x = integrate_velocity(float2(cell.x,       cell.y + 0.5), -advect_dt);
+    float2 pos_y = integrate_velocity(float2(cell.x + 0.5, cell.y),       -advect_dt);
+    float2 pos_c = integrate_velocity(float2(cell.x + 0.5, cell.y + 0.5), -advect_dt);
 
     if (cell.x < grid.resolution.x + 1 && cell.y < grid.resolution.y)
     {
@@ -78,9 +54,10 @@ void advect_particle(uint3 thread : SV_DispatchThreadID)
     if (any(cell >= grid.resolution))
         return;
 
-    float pressure = grid.sample_pressure_bspline(float2(cell) + 0.5);
-    float2 vel = grid.sample_velocity_bspline(float2(cell) + 0.5);
-    float2 pos = integrate_velocity_bspline(float2(cell) + 0.5, advect_dt);
+    // spawn a particle in the center of the cell
+    float pressure = grid.sample_pressure(float2(cell) + 0.5);
+    float2 vel = grid.sample_velocity(float2(cell) + 0.5);
+    float2 pos = integrate_velocity(float2(cell) + 0.5, advect_dt);
 
     Particle p;
     p.pos_in_cell = frac(pos);
@@ -94,50 +71,45 @@ void advect_particle(uint3 thread : SV_DispatchThreadID)
 void particle_to_grid(uint3 thread: SV_DispatchThreadID)
 {
     int2 dst_cell = thread.xy;
-
-    float pressure = 0;
-    float w_pressure = 0;
+    if (any(dst_cell >= grid.resolution + 1))
+        return;
     
     float vel_x = 0;
-    float w_vel_x = 0;
-
     float vel_y = 0;
-    float w_vel_y = 0;
+    float pressure = 0;
 
-    for (int y = -2; y <= 2; y++)
+    for (int y = -1; y <= 1; y++)
     {
-        for (int x = -2; x <= 2; x++)
+        for (int x = -1; x <= 1; x++)
         {
-            int2 cell = (dst_cell + int2(x,y) + grid.resolution) % grid.resolution;
+            int2 cell = (dst_cell + int2(x, y) + grid.resolution) % grid.resolution;
             uint2 range = particle_map.get_range(cell.y * grid.resolution.x + cell.x);
             for (uint i = range.x; i < range.y; i++)
             {
                 Particle p = particle_map.get(i);
 
-                float2 pos = cell + p.pos_in_cell;
+                // Use unwrapped position for correct distance at grid boundaries
+                float2 pos = float2(dst_cell + int2(x, y)) + p.pos_in_cell;
 
-                float2 dx = pos - float2(dst_cell.x, dst_cell.y + 0.5);
-                float wx = bspline(dx.x) * bspline(dx.y);
+                float2 dx = abs(pos - float2(dst_cell.x, dst_cell.y + 0.5));
+                float wx = max(0.0, 1.0 - dx.x) * max(0.0, 1.0 - dx.y);
                 vel_x += p.velocity.x * wx;
-                w_vel_x += wx;
 
-                float2 dy = pos - float2(dst_cell.x + 0.5, dst_cell.y);
-                float wy = bspline(dy.x) * bspline(dy.y);
+                float2 dy = abs(pos - float2(dst_cell.x + 0.5, dst_cell.y));
+                float wy = max(0.0, 1.0 - dy.x) * max(0.0, 1.0 - dy.y);
                 vel_y += p.velocity.y * wy;
-                w_vel_y += wy;
 
-                float2 dc = pos - (dst_cell + 0.5);
-                float wc = bspline(dc.x) * bspline(dc.y);
+                float2 dc = abs(pos - float2(dst_cell.x + 0.5, dst_cell.y + 0.5));
+                float wc = max(0.0, 1.0 - dc.x) * max(0.0, 1.0 - dc.y);
                 pressure += p.pressure * wc;
-                w_pressure += wc;
             }
         }
     }
 
     if (dst_cell.x < grid.resolution.x + 1 && dst_cell.y < grid.resolution.y)
-        grid.velocity_x_rw[dst_cell] = w_vel_x > 0 ? vel_x / w_vel_x : 0;
+        grid.velocity_x_rw[dst_cell] = vel_x;
     if (dst_cell.x < grid.resolution.x && dst_cell.y < grid.resolution.y + 1)
-        grid.velocity_y_rw[dst_cell] = w_vel_y > 0 ? vel_y / w_vel_y : 0;
+        grid.velocity_y_rw[dst_cell] = vel_y;
     if (dst_cell.x < grid.resolution.x && dst_cell.y < grid.resolution.y)
-        grid.pressure_rw[dst_cell] = w_pressure > 0 ? pressure / w_pressure : 0;
+        grid.pressure_rw[dst_cell]   = pressure;
 }

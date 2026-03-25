@@ -6,9 +6,12 @@ COLOR_FORMAT = spy.Format.rgba32_float
 
 INIT_NONE = 0
 INIT_VORTEX = 1
+INIT_LEAPFROG = 2
 
 ADVECT_GRID = 0
 ADVECT_PARTICLE = 1
+ADVECT_COFLIP_GRID = 2
+ADVECT_COFLIP_PARTICLE = 3
 
 def get_asset_path(asset):
     return os.path.join(os.path.dirname(__file__), asset)
@@ -39,9 +42,9 @@ class FluidSimulator:
             self.initialized = False
         spy.ui.Button(window, "Reset", callback=reset_callback)
 
-        self.init_mode  = spy.ui.ComboBox(window, "Init mode", 0, reset_callback, ["None", "Vortex"])
+        self.init_mode  = spy.ui.ComboBox(window, "Init mode", 0, reset_callback, ["None", "Vortex", "Leapfrog"])
         self.emit_smoke = spy.ui.CheckBox(window, "Emit smoke")
-        self.advect_mode = spy.ui.ComboBox(window, "Advect mode", 0, items=["Grid", "Particle"])
+        self.advect_mode = spy.ui.ComboBox(window, "Advect mode", 0, items=["Grid", "Particle", "CO-FLIP Grid", "CO-FLIP Particle"])
 
         self.resolution                  = spy.ui.DragInt2(window,  "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
         self.advect_dt                   = spy.ui.DragFloat(window, "Advection dt", value=0.1, min=0)
@@ -121,7 +124,7 @@ class FluidSimulator:
         self.pressure_correction_0 = create_grid(w, h, "pressure_correction_0")
         self.pressure_correction_1 = create_grid(w, h, "pressure_correction_1")
 
-        self.particle_map = ParticleMap(self.device, w*h, w*h)
+        self.particle_map = ParticleMap(self.device, w*h, 4*w*h)
 
         self.avg_pressure_buf = self.device.create_buffer(
             element_count=1,
@@ -142,6 +145,15 @@ class FluidSimulator:
             self.dispatch_pass(
                 "fluid-init.cs.slang",
                 "init_vortex",
+                self.mac_grid_dispatch_dim,
+                { "grid": self.grid_vars },
+                command_encoder)
+            self.pressure_project(command_encoder)
+            self.swap_grids()
+        elif self.init_mode.value == INIT_LEAPFROG:
+            self.dispatch_pass(
+                "fluid-init.cs.slang",
+                "init_leapfrog_vortex",
                 self.mac_grid_dispatch_dim,
                 { "grid": self.grid_vars },
                 command_encoder)
@@ -192,6 +204,28 @@ class FluidSimulator:
                 self.dispatch_pass(
                     "fluid-advection.cs.slang",
                     "particle_to_grid",
+                    self.mac_grid_dispatch_dim,
+                    vars,
+                    command_encoder)
+            elif self.advect_mode.value == ADVECT_COFLIP_GRID:
+                self.dispatch_pass(
+                    "coflip-sim.cs.slang",
+                    "advect_coflip_grid",
+                    self.mac_grid_dispatch_dim,
+                    vars,
+                    command_encoder)
+            elif self.advect_mode.value == ADVECT_COFLIP_PARTICLE:
+                self.particle_map.clear(command_encoder)
+                self.dispatch_pass(
+                    "coflip-sim.cs.slang",
+                    "advect_coflip_particle",
+                    self.grid_dispatch_dim,
+                    vars,
+                    command_encoder)
+                self.particle_map.sort(command_encoder)
+                self.dispatch_pass(
+                    "coflip-sim.cs.slang",
+                    "coflip_particle_to_grid",
                     self.mac_grid_dispatch_dim,
                     vars,
                     command_encoder)
