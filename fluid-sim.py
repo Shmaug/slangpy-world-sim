@@ -7,6 +7,9 @@ COLOR_FORMAT = spy.Format.rgba32_float
 INIT_NONE = 0
 INIT_VORTEX = 1
 
+ADVECT_GRID = 0
+ADVECT_PARTICLE = 1
+
 def get_asset_path(asset):
     return os.path.join(os.path.dirname(__file__), asset)
 
@@ -38,6 +41,7 @@ class FluidSimulator:
 
         self.init_mode  = spy.ui.ComboBox(window, "Init mode", 0, reset_callback, ["None", "Vortex"])
         self.emit_smoke = spy.ui.CheckBox(window, "Emit smoke")
+        self.advect_mode = spy.ui.ComboBox(window, "Advect mode", 0, items=["Grid", "Particle"])
 
         self.resolution                  = spy.ui.DragInt2(window,  "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
         self.advect_dt                   = spy.ui.DragFloat(window, "Advection dt", value=0.1, min=0)
@@ -108,8 +112,8 @@ class FluidSimulator:
             "velocity_x_rw":  create_grid(w+1, h, "velocity_x_1"),
             "velocity_y":     create_grid(w, h+1, "velocity_y_0"),
             "velocity_y_rw":  create_grid(w, h+1, "velocity_y_1"),
-            "pressure":       create_grid(w, h, "pressure_0", spy.ALL_MIPS),
-            "pressure_rw":    create_grid(w, h, "pressure_1", spy.ALL_MIPS),
+            "pressure":       create_grid(w, h,   "pressure_0", spy.ALL_MIPS),
+            "pressure_rw":    create_grid(w, h,   "pressure_1", spy.ALL_MIPS),
             "linear_sampler": self.device.create_sampler(),
             "resolution":     self.resolution.value,
         }
@@ -165,13 +169,32 @@ class FluidSimulator:
             self.pressure_project(command_encoder)
             self.swap_grids()
 
-        for iter in range(self.advection_iterations.value):
-            self.dispatch_pass(
-                "fluid-advection.cs.slang",
-                "advect",
-                self.mac_grid_dispatch_dim,
-                { "grid": self.grid_vars, "dt": self.advect_dt.value / self.advection_iterations.value },
-                command_encoder)
+        for _ in range(self.advection_iterations.value):
+            vars = { "grid": self.grid_vars,
+                    "particle_map": self.particle_map.vars,
+                    "advect_dt": self.advect_dt.value / self.advection_iterations.value }
+            if self.advect_mode.value == ADVECT_GRID:
+                self.dispatch_pass(
+                    "fluid-advection.cs.slang",
+                    "advect_grid",
+                    self.mac_grid_dispatch_dim,
+                    vars,
+                    command_encoder)
+            elif self.advect_mode.value == ADVECT_PARTICLE:
+                self.particle_map.clear(command_encoder)
+                self.dispatch_pass(
+                    "fluid-advection.cs.slang",
+                    "advect_particle",
+                    self.grid_dispatch_dim,
+                    vars,
+                    command_encoder)
+                self.particle_map.sort(command_encoder)
+                self.dispatch_pass(
+                    "fluid-advection.cs.slang",
+                    "particle_to_grid",
+                    self.mac_grid_dispatch_dim,
+                    vars,
+                    command_encoder)
             self.pressure_project(command_encoder)
             self.swap_grids()
 
@@ -224,7 +247,7 @@ class App:
         
         self.simulator.setup_ui(spy.ui.Group(window, label="Simulation"))
 
-        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Pressure", "Velocity", "Divergence" ])
+        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Pressure", "Velocity", "Divergence", "Pressure (bspline)", "Velocity (bspline)" ])
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
