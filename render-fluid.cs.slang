@@ -34,7 +34,8 @@ void main(int2 pixel : SV_DispatchThreadID)
     {
         if (render_mode == 0)
         {
-            c.rgb = viridis(saturate(grid.sample_pressure(grid_pos)));
+            float p = grid.sample_pressure(grid_pos);
+            c.rgb = saturate(float3(1 - exp(p), 1 - exp(-p), 0.1));
         }
         else if (render_mode == 1)
         {

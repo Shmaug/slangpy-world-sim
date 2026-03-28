@@ -51,6 +51,7 @@ class FluidSimulator:
         self.advection_iterations        = spy.ui.DragInt(window,   "Advection iterations", value=3, min=1)
         self.pressure_project_iterations = spy.ui.DragInt(window,   "Pressure projection iterations", value=50, min=1)
         self.avg_pressure = spy.ui.Text(window, "Avg pressure: 0")
+        self.use_pressure_correction = spy.ui.CheckBox(window, "Pressure correction")
     
     def swap_grids(self):
         for name in ["velocity_x", "velocity_y", "pressure"]:
@@ -126,7 +127,13 @@ class FluidSimulator:
 
         self.particle_map = ParticleMap(self.device, w*h, 4*w*h)
 
-        self.avg_pressure_buf = self.device.create_buffer(
+        self.avg_pressure_gpu = self.device.create_buffer(
+            element_count=1,
+            struct_size=4,
+            format=spy.Format.r32_float,
+            usage=spy.BufferUsage.copy_destination|spy.BufferUsage.shader_resource
+        )
+        self.avg_pressure_cpu = self.device.create_buffer(
             element_count=1,
             struct_size=4,
             format=spy.Format.r32_float,
@@ -185,6 +192,10 @@ class FluidSimulator:
             vars = { "grid": self.grid_vars,
                     "particle_map": self.particle_map.vars,
                     "advect_dt": self.advect_dt.value / self.advection_iterations.value }
+            
+            if self.use_pressure_correction.value:
+                command_encoder.generate_mips(self.grid_vars["pressure"])
+            
             if self.advect_mode.value == ADVECT_GRID:
                 self.dispatch_pass(
                     "fluid-advection.cs.slang",
@@ -229,12 +240,25 @@ class FluidSimulator:
                     self.mac_grid_dispatch_dim,
                     vars,
                     command_encoder)
+            
             self.pressure_project(command_encoder)
+            
+            if self.use_pressure_correction.value:
+                # force avg pressure to match before the step
+                command_encoder.generate_mips(self.grid_vars["pressure_rw"])
+                command_encoder.copy_texture_to_buffer(self.avg_pressure_gpu, 0, 4, 256, self.grid_vars["pressure_rw"], 0, self.grid_vars["pressure_rw"].mip_count-1, [0,0,0], [1,1,1])
+                self.dispatch_pass(
+                    "pressure-correction.cs.slang",
+                    "pressure_correction",
+                    self.grid_dispatch_dim,
+                    {"grid":self.grid_vars, "current_pressure": self.avg_pressure_gpu },
+                    command_encoder)
+            
             self.swap_grids()
 
         command_encoder.generate_mips(self.grid_vars["pressure"])
-        command_encoder.copy_texture_to_buffer(self.avg_pressure_buf, 0, 4, 256, self.grid_vars["pressure"], 0, self.grid_vars["pressure"].mip_count-1, [0,0,0], [1,1,1])
-        self.avg_pressure.text = f"Avg pressure: {self.avg_pressure_buf.to_numpy()[0]}"
+        command_encoder.copy_texture_to_buffer(self.avg_pressure_cpu, 0, 4, 256, self.grid_vars["pressure"], 0, self.grid_vars["pressure"].mip_count-1, [0,0,0], [1,1,1])
+        self.avg_pressure.text = f"Avg pressure: {self.avg_pressure_cpu.to_numpy()[0]}"
 
 class App:
     def __init__(self):
