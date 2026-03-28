@@ -11,7 +11,6 @@ INIT_LEAPFROG = 2
 ADVECT_GRID = 0
 ADVECT_PARTICLE = 1
 ADVECT_COFLIP_GRID = 2
-ADVECT_COFLIP_PARTICLE = 3
 
 def get_asset_path(asset):
     return os.path.join(os.path.dirname(__file__), asset)
@@ -44,7 +43,7 @@ class FluidSimulator:
 
         self.init_mode  = spy.ui.ComboBox(window, "Init mode", 0, reset_callback, ["None", "Vortex", "Leapfrog"])
         self.emit_smoke = spy.ui.CheckBox(window, "Emit smoke")
-        self.advect_mode = spy.ui.ComboBox(window, "Advect mode", 0, items=["Grid", "Particle", "CO-FLIP Grid", "CO-FLIP Particle"])
+        self.advect_mode = spy.ui.ComboBox(window, "Advect mode", 0, items=["Grid", "Particle", "Grid (covector)"])
 
         self.resolution                  = spy.ui.DragInt2(window,  "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
         self.advect_dt                   = spy.ui.DragFloat(window, "Advection dt", value=0.1, min=0)
@@ -220,23 +219,8 @@ class FluidSimulator:
                     command_encoder)
             elif self.advect_mode.value == ADVECT_COFLIP_GRID:
                 self.dispatch_pass(
-                    "coflip-sim.cs.slang",
-                    "advect_coflip_grid",
-                    self.mac_grid_dispatch_dim,
-                    vars,
-                    command_encoder)
-            elif self.advect_mode.value == ADVECT_COFLIP_PARTICLE:
-                self.particle_map.clear(command_encoder)
-                self.dispatch_pass(
-                    "coflip-sim.cs.slang",
-                    "advect_coflip_particle",
-                    self.grid_dispatch_dim,
-                    vars,
-                    command_encoder)
-                self.particle_map.sort(command_encoder)
-                self.dispatch_pass(
-                    "coflip-sim.cs.slang",
-                    "coflip_particle_to_grid",
+                    "fluid-advection.cs.slang",
+                    "advect_grid_covector",
                     self.mac_grid_dispatch_dim,
                     vars,
                     command_encoder)
@@ -305,7 +289,7 @@ class App:
         
         self.simulator.setup_ui(spy.ui.Group(window, label="Simulation"))
 
-        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Pressure", "Velocity", "Divergence", "Pressure (bspline)", "Velocity (bspline)" ])
+        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Pressure", "Velocity", "Divergence" ])
 
     def on_resize(self, width: int, height: int):
         self.device.wait()

@@ -48,6 +48,34 @@ void advect_grid(uint3 thread : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
+void advect_grid_covector(uint3 thread : SV_DispatchThreadID)
+{
+    uint2 cell = thread.xy;
+
+    float2 pos_x = integrate_velocity(float2(cell.x,       cell.y + 0.5), -advect_dt);
+    float2 pos_y = integrate_velocity(float2(cell.x + 0.5, cell.y),       -advect_dt);
+    float2 pos_c = integrate_velocity(float2(cell.x + 0.5, cell.y + 0.5), -advect_dt);
+
+    if (cell.x < grid.resolution.x + 1 && cell.y < grid.resolution.y)
+    {
+        float2 v = grid.sample_velocity(pos_x);
+        grid.velocity_x_rw[cell] = v.x;
+    }
+
+    if (cell.x < grid.resolution.x && cell.y < grid.resolution.y + 1)
+    {
+        float2 v = grid.sample_velocity(pos_y);
+        grid.velocity_y_rw[cell] = v.y;
+    }
+
+    if (cell.x < grid.resolution.x && cell.y < grid.resolution.y)
+    {
+        grid.pressure_rw[cell] = grid.sample_pressure(pos_c);
+    }
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
 void advect_particle(uint3 thread : SV_DispatchThreadID)
 {
     uint2 cell = thread.xy;
