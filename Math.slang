@@ -21,10 +21,31 @@ static const float M_SQRT3   = 1.732050807568877293527; // sqrt(3)
 static const float M_SQRTPI  = 1.77245385090551602730;  // sqrt(pi)
 static const float M_1_SQRT2 = 0.707106781186547524401; // 1/sqrt(2)
 
+float safe_divide(float a, float b)
+{
+    return abs(b) > 0 ? a / b : 0;
+}
+
+vector<float, N> safe_normalize<let N : int>(vector<float, N> vec)
+{
+    float n = length(vec);
+    return n > 0 ? vec / n : 0;
+}
+
 float sqr(float a)
 {
     return a * a;
 }
+
+int2 wrap_index(int2 i, uint2 dim)
+{
+    return (i + dim) % dim;
+}
+float2 wrap_index(float2 i, float2 dim)
+{
+    return (i + dim) % dim;
+}
+
 float luminance(float3 rgb)
 {
     return dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
@@ -74,4 +95,34 @@ float2 xyz_to_uv(float3 xyz)
         -atan2(xyz.x, -xyz.z) * M_1_2PI + 0.5,
         acos(xyz.y) * M_1_PI
     );
+}
+
+// xxhash https://github.com/Cyan4973/xxHash
+// implementation from https://www.shadertoy.com/view/Xt3cDn
+uint xxhash32(const uint p)
+{
+    const uint PRIME32_2 = 2246822519U, PRIME32_3 = 3266489917U;
+    const uint PRIME32_4 = 668265263U, PRIME32_5 = 374761393U;
+    uint h32 = p + PRIME32_5;
+    h32 = PRIME32_4 * ((h32 << 17) | (h32 >> (32 - 17)));
+    h32 = PRIME32_2 * (h32 ^ (h32 >> 15));
+    h32 = PRIME32_3 * (h32 ^ (h32 >> 13));
+    return h32 ^ (h32 >> 16);
+}
+
+// PCG (https://www.pcg-random.org/)
+uint pcg(const uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// B-spline basis function (quadratic)
+[Differentiable]
+float bspline(float r) {
+    r = abs(r);
+    if (r < 0.5) return 0.75 - r * r;
+    if (r < 1.5) return 0.5 * (1.5 - r) * (1.5 - r);
+    return 0.0;
 }
