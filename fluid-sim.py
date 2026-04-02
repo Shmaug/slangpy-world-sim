@@ -43,7 +43,7 @@ class FluidSimulator:
 
         self.resolution                  = spy.ui.DragInt2(window,  "Resolution", value=spy.int2(512,512), min=1, callback=reset_callback)
         self.advect_dt                   = spy.ui.DragFloat(window, "Advection dt", value=0.1, min=0)
-        self.advection_iterations        = spy.ui.DragInt(window,   "Advection iterations", value=3, min=1)
+        self.advection_iterations        = spy.ui.DragInt(window,   "Advection iterations", value=1, min=1)
         self.pressure_project_iterations = spy.ui.DragInt(window,   "Pressure projection iterations", value=50, min=1)
         self.avg_pressure = spy.ui.Text(window, "Avg pressure: 0")
         self.use_pressure_correction = spy.ui.CheckBox(window, "Pressure correction")
@@ -195,7 +195,6 @@ class FluidSimulator:
         command_encoder.clear_texture_float(self.pressure_correction_1)
         vars = {
             "grid": self.grid_vars,
-            "dt":   self.advect_dt.value / self.advection_iterations.value,
             "divergence":             self.divergence,
             "pressure_correction":    self.pressure_correction_0,
             "pressure_correction_rw": self.pressure_correction_1,

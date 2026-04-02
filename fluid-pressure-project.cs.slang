@@ -5,7 +5,6 @@ uniform FluidGrid grid;
 RWTexture2D<float> divergence;
 Texture2D<float>   pressure_correction;
 RWTexture2D<float> pressure_correction_rw;
-uniform float dt;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -54,6 +53,6 @@ void apply(uint3 thread: SV_DispatchThreadID)
     float px = pressure_correction[wrap_index(cell - int2(1, 0), grid.resolution)];
     float py = pressure_correction[wrap_index(cell - int2(0, 1), grid.resolution)];
 
-    grid.velocity_x_rw[cell] -= dt * (p - px);
-    grid.velocity_y_rw[cell] -= dt * (p - py);
+    grid.velocity_x_rw[cell] -= (p - px);
+    grid.velocity_y_rw[cell] -= (p - py);
 }

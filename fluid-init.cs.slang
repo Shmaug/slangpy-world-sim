@@ -128,8 +128,8 @@ void emit_smoke(uint3 thread: SV_DispatchThreadID)
 
     if (all(cell >= box.xy) && all(cell < box.zw))
     {
-        pressure += 0.1;
-        vel += float2(0, -0.01) * grid.resolution;
+        pressure = lerp(pressure, 1, 0.9);
+        vel = lerp(vel, float2(0, -0.02) * grid.resolution, 0.9);
     }
 
     if (all(cell < grid.resolution))
@@ -159,10 +159,10 @@ void emit_drag(uint3 thread: SV_DispatchThreadID)
 
     float dist = length(p - lerp(drag_start, drag_end, t));
     float s = max(grid.resolution.x, grid.resolution.y);
-    float f = exp(-3000 * sqr(dist/s));
-    
-    pressure += f;
-    vel += dir * f;
+    float f = exp(-1000 * sqr(dist/s));
+
+    pressure = lerp(pressure, 1, f*0.9);
+    vel = lerp(vel, safe_normalize(dir) * min(length(dir), s*.05), f * 0.9);
 
     if (all(cell < grid.resolution))
         grid.pressure_rw[cell] = pressure;
