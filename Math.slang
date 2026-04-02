@@ -26,10 +26,26 @@ float safe_divide(float a, float b)
     return abs(b) > 0 ? a / b : 0;
 }
 
+vector<float, N> safe_normalize<let N : int>(vector<float, N> vec)
+{
+    float n = length(vec);
+    return n > 0 ? vec / n : 0;
+}
+
 float sqr(float a)
 {
     return a * a;
 }
+
+int2 wrap_index(int2 i, uint2 dim)
+{
+    return (i + dim) % dim;
+}
+float2 wrap_index(float2 i, float2 dim)
+{
+    return (i + dim) % dim;
+}
+
 float luminance(float3 rgb)
 {
     return dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));

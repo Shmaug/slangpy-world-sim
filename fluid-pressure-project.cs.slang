@@ -32,10 +32,10 @@ void step(uint3 thread: SV_DispatchThreadID)
         return;
 
     float p = 0;
-    p += pressure_correction[(cell - int2(1, 0) + grid.resolution) % grid.resolution];
-    p += pressure_correction[(cell + int2(1, 0) + grid.resolution) % grid.resolution];
-    p += pressure_correction[(cell - int2(0, 1) + grid.resolution) % grid.resolution];
-    p += pressure_correction[(cell + int2(0, 1) + grid.resolution) % grid.resolution];
+    p += pressure_correction[wrap_index(cell - int2(1, 0), grid.resolution)];
+    p += pressure_correction[wrap_index(cell + int2(1, 0), grid.resolution)];
+    p += pressure_correction[wrap_index(cell - int2(0, 1), grid.resolution)];
+    p += pressure_correction[wrap_index(cell + int2(0, 1), grid.resolution)];
 
     p -= divergence[cell];
 
@@ -51,8 +51,8 @@ void apply(uint3 thread: SV_DispatchThreadID)
         return;
 
     float p = pressure_correction[cell];
-    float px = pressure_correction[(cell - int2(1, 0) + grid.resolution) % grid.resolution];
-    float py = pressure_correction[(cell - int2(0, 1) + grid.resolution) % grid.resolution];
+    float px = pressure_correction[wrap_index(cell - int2(1, 0), grid.resolution)];
+    float py = pressure_correction[wrap_index(cell - int2(0, 1), grid.resolution)];
 
     grid.velocity_x_rw[cell] -= dt * (p - px);
     grid.velocity_y_rw[cell] -= dt * (p - py);

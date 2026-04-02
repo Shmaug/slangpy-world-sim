@@ -2,6 +2,8 @@ import Math;
 import FluidGrid;
 
 uniform FluidGrid grid;
+uniform float2 drag_start;
+uniform float2 drag_end;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -121,14 +123,46 @@ void emit_smoke(uint3 thread: SV_DispatchThreadID)
         grid.resolution.x * 0.25, grid.resolution.y * 0.8,
         grid.resolution.x * 0.75, grid.resolution.y * 0.9);
 
-    float pressure = grid.pressure[cell];
-    float2 vel = float2(grid.velocity_x[cell], grid.velocity_y[cell]);
+    float pressure = grid.pressure_rw[cell];
+    float2 vel = float2(grid.velocity_x_rw[cell], grid.velocity_y_rw[cell]);
 
     if (all(cell >= box.xy) && all(cell < box.zw))
     {
-        pressure = 1;
-        vel = float2(0, -0.1) * grid.resolution;
+        pressure += 0.1;
+        vel += float2(0, -0.01) * grid.resolution;
     }
+
+    if (all(cell < grid.resolution))
+        grid.pressure_rw[cell] = pressure;
+    if (cell.y < grid.resolution.y)
+        grid.velocity_x_rw[cell] = vel.x;
+    if (cell.x < grid.resolution.x)
+        grid.velocity_y_rw[cell] = vel.y;
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void emit_drag(uint3 thread: SV_DispatchThreadID)
+{
+    uint2 cell = thread.xy;
+    if (any(cell >= grid.resolution + 1))
+        return;
+
+    float pressure = grid.pressure_rw[cell];
+    float2 vel = float2(grid.velocity_x_rw[cell], grid.velocity_y_rw[cell]);
+
+    float2 dir = drag_end - drag_start;
+
+    float2 p = cell + 0.5;
+
+    float t = saturate(safe_divide(dot(p - drag_start, dir), dot(dir, dir)));
+
+    float dist = length(p - lerp(drag_start, drag_end, t));
+    float s = max(grid.resolution.x, grid.resolution.y);
+    float f = exp(-3000 * sqr(dist/s));
+    
+    pressure += f;
+    vel += dir * f;
 
     if (all(cell < grid.resolution))
         grid.pressure_rw[cell] = pressure;

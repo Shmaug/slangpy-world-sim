@@ -15,7 +15,7 @@ float2 integrate_velocity(float2 grid_pos, float dt)
     float2 k4 = grid.sample_velocity(grid_pos + k3 * dt);
     grid_pos += (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4);
 
-    grid_pos = (grid_pos + grid.resolution) % grid.resolution;
+    grid_pos = wrap_index(grid_pos, grid.resolution);
 
     return grid_pos;
 }
@@ -38,34 +38,6 @@ void advect_grid(uint3 thread : SV_DispatchThreadID)
     if (cell.x < grid.resolution.x && cell.y < grid.resolution.y + 1)
     {
         grid.velocity_y_rw[cell] = grid.sample_velocity(pos_y).y;
-    }
-
-    if (cell.x < grid.resolution.x && cell.y < grid.resolution.y)
-    {
-        grid.pressure_rw[cell] = grid.sample_pressure(pos_c);
-    }
-}
-
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void advect_grid_covector(uint3 thread : SV_DispatchThreadID)
-{
-    uint2 cell = thread.xy;
-
-    float2 pos_x = integrate_velocity(float2(cell.x,       cell.y + 0.5), -advect_dt);
-    float2 pos_y = integrate_velocity(float2(cell.x + 0.5, cell.y),       -advect_dt);
-    float2 pos_c = integrate_velocity(float2(cell.x + 0.5, cell.y + 0.5), -advect_dt);
-
-    if (cell.x < grid.resolution.x + 1 && cell.y < grid.resolution.y)
-    {
-        float2 v = grid.sample_velocity(pos_x);
-        grid.velocity_x_rw[cell] = v.x;
-    }
-
-    if (cell.x < grid.resolution.x && cell.y < grid.resolution.y + 1)
-    {
-        float2 v = grid.sample_velocity(pos_y);
-        grid.velocity_y_rw[cell] = v.y;
     }
 
     if (cell.x < grid.resolution.x && cell.y < grid.resolution.y)
@@ -110,7 +82,7 @@ void particle_to_grid(uint3 thread: SV_DispatchThreadID)
     {
         for (int x = -1; x <= 1; x++)
         {
-            int2 cell = (dst_cell + int2(x, y) + grid.resolution) % grid.resolution;
+            int2 cell = wrap_index(dst_cell + int2(x, y), grid.resolution);
             uint2 range = particle_map.get_range(cell.y * grid.resolution.x + cell.x);
             for (uint i = range.x; i < range.y; i++)
             {
