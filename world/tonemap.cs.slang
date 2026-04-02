@@ -13,7 +13,7 @@ uniform float exposure;
 
 [shader("compute")]
 [numthreads(8,8,1)]
-void main(uint3 index : SV_DispatchThreadID)
+void tonemap(uint3 index : SV_DispatchThreadID)
 {
     uint2 dim;
     image.GetDimensions(dim.x, dim.y);

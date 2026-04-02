@@ -2,156 +2,35 @@ import os
 import slangpy as spy
 import math
 import numpy as np
+from Camera import Camera, InputState
 
 COLOR_FORMAT = spy.Format.rgba32_float
 DEPTH_FORMAT = spy.Format.d32_float
 
-def is_down(input_state, key):
-    return key in input_state and input_state[key]
-
-class Camera:
-    def __init__(self):
-        self.position = spy.float3(0,0,1.5)
-        self.rotation = spy.float2(0,0)
-        self.fovY = spy.math.radians(60)
-        self.drag_start = None
-        self.drag_start_rotation = None
-        self.move_speed = 0.1
-        self.sensitivity = .002
-
-    def get_rotation(self):
-        ry = spy.math.rotate(spy.float4x4(), self.rotation[0], spy.float3(0,1,0))
-        rx = spy.math.rotate(spy.float4x4(), self.rotation[1], spy.float3(1,0,0))
-        return spy.math.mul(ry, rx)
-    
-    def camera_to_world(self):
-        return spy.math.mul(spy.math.translate(spy.float4x4(), self.position), self.get_rotation())
-
-    def projection(self, aspect, nearZ = 0.01, farZ = 100):
-        return spy.math.perspective(self.fovY, aspect, nearZ, farZ)
-
-    def update(self, input_state, dt):
-        if is_down(input_state, spy.MouseButton.left) and "mouse" in input_state:
-            if self.drag_start is None:
-                self.drag_start = input_state["mouse"]
-                self.drag_start_rotation = self.rotation
-            delta = (input_state["mouse"] - self.drag_start) * self.sensitivity
-            self.rotation = self.drag_start_rotation - delta
-            if self.rotation.x < 0: self.rotation.x += 2*math.pi
-            elif self.rotation.x > 2*math.pi: self.rotation.x -= 2*math.pi
-            self.rotation.y = min(max(self.rotation.y, -math.pi/2), math.pi/2)
-        else:
-            self.drag_start = None
-            self.drag_start_rotation = None
-
-        move = spy.float3(0,0,0)
-        if is_down(input_state, spy.KeyCode.w): move += spy.float3(0,0,-1)
-        if is_down(input_state, spy.KeyCode.s): move += spy.float3(0,0,1)
-        if is_down(input_state, spy.KeyCode.a): move += spy.float3(-1,0,0)
-        if is_down(input_state, spy.KeyCode.d): move += spy.float3(1,0,0)
-        if is_down(input_state, spy.KeyCode.q): move += spy.float3(0,-1,0)
-        if is_down(input_state, spy.KeyCode.e): move += spy.float3(0,1,0)
-        move *= self.move_speed
-        if is_down(input_state, spy.KeyCode.left_control): move *= 0.01
-        if is_down(input_state, spy.KeyCode.left_shift): move *= 10.0
-        self.position += spy.math.transform_vector(self.get_rotation(), move) * dt
-        h = spy.math.length(self.position)
-        if h < (1 + .01/6371): # limit to 10m above surface
-            self.position = (1 + .01/6371) * self.position/h
-
-class WorldSimulator:
-    def load_single_channel(self, path, channel, usage):
-        bitmap = spy.Bitmap(path)
-        bitmap1 = spy.Bitmap(pixel_format=spy.Bitmap.PixelFormat.r, component_type=spy.Bitmap.ComponentType.uint16, width=bitmap.width, height=bitmap.height, channel_count=1)
-        pixels  = np.array(bitmap, copy=False)
-        pixels1 = np.array(bitmap1, copy=False)
-        pixels1[:,:] = 65535.0 * (pixels[:,:,channel] / 255.0)
-        return self.texture_loader.load_texture(bitmap=bitmap1, options=spy.TextureLoader.Options({ "load_as_normalized": True, "usage": usage, "allocate_mips": False, "load_as_srgb": False }))
-
-    def load_clouds(self):
-        self.cloud_density  = self.load_single_channel("earth_clouds.png", 3, spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access)
-        self.cloud_velocity = self.device.create_texture(
-            format=spy.Format.rg32_float,
-            width=self.cloud_density.width,
-            height=self.cloud_density.height,
-            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label="cloud_velocity",
-            data=np.zeros((self.cloud_density.height, self.cloud_density.width))
-        )
-        self.cloud_density_out  = self.device.create_texture(
-            format=self.cloud_density.format,
-            width=self.cloud_density.width,
-            height=self.cloud_density.height,
-            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label="cloud_density_out"
-        )
-        self.cloud_velocity_out = self.device.create_texture(
-            format=spy.Format.rg32_float,
-            width=self.cloud_density.width,
-            height=self.cloud_density.height,
-            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-            label="cloud_velocity_out"
-        )
-
-    def __init__(self, device : spy.Device):
-        self.device = device
-        self.texture_loader = spy.TextureLoader(self.device)
-
-        self.enabled = False
-        self.step_once = False
-
-        self.surface_albedo = self.texture_loader.load_texture("earth_albedo.png", options=spy.TextureLoader.Options({ "allocate_mips": False, "load_as_srgb": True }))
-        self.surface_height = self.load_single_channel("earth_height.png", 0, spy.TextureUsage.shader_resource)
-        self.load_clouds()
-
-        self.advect_pass = self.device.create_compute_kernel(self.device.load_program("atmosphere-sim.cs.slang", ["advect"]))
-
-    def setup_ui(self, window):
-        def toggle_callback():
-            self.enabled = not self.enabled
-            self.toggle_button.label = "Pause simulation" if self.enabled else "Resume simulation"
-        self.toggle_button = spy.ui.Button(window, "Resume simulation", callback=toggle_callback)
-
-        def step_callback():
-            self.step_once = True
-        spy.ui.Button(window, "Step", callback=step_callback)
-
-        def reset_callback():
-            self.load_clouds()
-        spy.ui.Button(window, "Reset", callback=reset_callback)
-
-        self.viscosity = spy.ui.DragFloat(window, "Viscosity", value=0, min=0)
-        self.K         = spy.ui.DragFloat(window, "K", value=0.2, min=0)
-        self.dt        = spy.ui.DragFloat(window, "dt", value=0.001, min=0)
-
-    def step(self, command_encoder, dt):
-        if not self.enabled and not self.step_once:
-            return
-        self.step_once = False
-        self.advect_pass.dispatch(
-            thread_count=[self.cloud_density.width, self.cloud_density.height, 1],
-            vars={
-                "density":      self.cloud_density,
-                "velocity":     self.cloud_velocity,
-                "density_out":  self.cloud_density_out,
-                "velocity_out": self.cloud_velocity_out,
-                "dim": spy.uint2(self.cloud_density.width, self.cloud_density.height),
-                "K": self.K.value,
-                "viscosity": self.viscosity.value,
-                "dt": self.dt.value,
-            },
-            command_encoder=command_encoder
-        )
-
-        self.cloud_density,  self.cloud_density_out  = self.cloud_density_out,  self.cloud_density
-        self.cloud_velocity, self.cloud_velocity_out = self.cloud_velocity_out, self.cloud_velocity
+def get_asset_path(path):
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.path.dirname(__file__), path)
 
 class WorldRenderer:
     def __init__(self, device : spy.Device):
         self.device = device
+        self.texture_loader = spy.TextureLoader(self.device)
+            
+        def load_single_channel(path, channel, usage):
+            bitmap = spy.Bitmap(path)
+            bitmap1 = spy.Bitmap(pixel_format=spy.Bitmap.PixelFormat.r, component_type=spy.Bitmap.ComponentType.uint16, width=bitmap.width, height=bitmap.height, channel_count=1)
+            pixels  = np.array(bitmap, copy=False)
+            pixels1 = np.array(bitmap1, copy=False)
+            pixels1[:,:] = 65535.0 * (pixels[:,:,channel] / 255.0)
+            return self.texture_loader.load_texture(bitmap=bitmap1, options=spy.TextureLoader.Options({ "load_as_normalized": True, "usage": usage, "allocate_mips": False, "load_as_srgb": False }))
+
+        self.surface_albedo_texture = self.texture_loader.load_texture(get_asset_path("earth_albedo.png"), options=spy.TextureLoader.Options({ "allocate_mips": False, "load_as_srgb": True }))
+        self.surface_height_texture = load_single_channel(get_asset_path("earth_height.png"), 0, spy.TextureUsage.shader_resource)
+        self.cloud_texture  = load_single_channel(get_asset_path("earth_clouds.png"), 3, spy.TextureUsage.shader_resource)
 
         self.render_pipeline = self.device.create_render_pipeline(
-            program=self.device.load_program("render-sphere.3d.slang", entry_point_names=["vs", "fs"]),
+            program=self.device.load_program(get_asset_path("render-sphere.3d.slang"), entry_point_names=["vs", "fs"]),
             input_layout=None,
             targets=[spy.ColorTargetDesc({
                 "format": COLOR_FORMAT, 
@@ -199,7 +78,6 @@ class WorldRenderer:
 
     def render(self,
                command_encoder : spy.CommandEncoder,
-               sim : WorldSimulator,
                camera : Camera,
                render_width,
                render_height,
@@ -231,9 +109,9 @@ class WorldRenderer:
             projection = camera.projection(render_width / render_height)
 
             cursor = spy.ShaderCursor(shader)
-            cursor["planet_albedo"]              = sim.surface_albedo
-            cursor["planet_height"]              = sim.surface_height
-            cursor["planet_clouds"]              = sim.cloud_density
+            cursor["planet_albedo"]              = self.surface_albedo_texture
+            cursor["planet_height"]              = self.surface_height_texture
+            cursor["planet_clouds"]              = self.cloud_texture
             cursor["sampler"]                    = self.texture_sampler
             cursor["view_projection"]            = spy.math.mul(projection, view)
             cursor["camera_position"]            = spy.math.transform_point(camera_to_world, spy.float3(0,0,0))
@@ -261,7 +139,7 @@ class App:
     def __init__(self):
         super().__init__()
         self.device = spy.create_device(include_paths=[os.path.abspath("."), os.path.abspath("src")])
-        self.window = spy.Window(width=1920, height=1080, title="App", resizable=True)
+        self.window = spy.Window(width=800, height=600, title="App", resizable=True)
         self.surface = self.device.create_surface(self.window)
         self.surface.configure({
             "width":  self.window.width,
@@ -278,15 +156,14 @@ class App:
 
         self.pause = False
         self.minimized = False
-        self.input_state = {}
+        self.input_state = InputState()
         self.render_texture = None
         self.fps_avg = 0
 
-        self.simulator  = WorldSimulator(self.device)
         self.renderer   = WorldRenderer(self.device)
         self.camera = Camera()
 
-        self.tonemapper = self.device.create_compute_kernel(self.device.load_program("tonemap.cs.slang", ["main"]))
+        self.tonemapper = self.device.create_compute_kernel(self.device.load_program(get_asset_path("tonemap.cs.slang"), ["tonemap"]))
 
         self.setup_ui()
 
@@ -304,7 +181,6 @@ class App:
         self.camera_pos_text = spy.ui.Text(window, "Camera: 0")
         self.exposure = spy.ui.SliderFloat(window, "Exposure", value=0.0, min=-12, max=12)
         
-        self.simulator.setup_ui(spy.ui.Group(window, label="Simulation"))
         self.renderer.setup_ui(spy.ui.Group(window, label="Renderer"))
 
     def on_resize(self, width: int, height: int):
@@ -322,20 +198,16 @@ class App:
 
     def on_keyboard_event(self, event: spy.KeyboardEvent):
         has_focus = not self.ui.handle_keyboard_event(event)
-        if has_focus and event.is_key_press(): self.input_state[event.key] = True
-        if event.is_key_release(): self.input_state[event.key] = False
+        self.input_state.on_keyboard_event(event, has_focus)
         
     def on_mouse_event(self, event: spy.MouseEvent):
         has_focus = not self.ui.handle_mouse_event(event)
-        if event.is_move(): self.input_state["mouse"] = event.pos
-        if has_focus and event.is_button_down(): self.input_state[event.button] = True
-        if has_focus and event.is_scroll(): self.input_state["scroll"] = event.scroll.y
-        if event.is_button_up(): self.input_state[event.button] = False
+        self.input_state.on_mouse_event(event, has_focus)
 
     def main_loop(self):
         timer = spy.Timer()
         while not self.window.should_close():
-            self.input_state["scroll"] = 0
+            self.input_state.update()
             self.window.process_events()
 
             if self.minimized:
@@ -352,7 +224,6 @@ class App:
             command_encoder = self.device.create_command_encoder()
 
             if not self.pause:
-                self.simulator.step(command_encoder, dt)
                 self.camera.update(self.input_state, dt)
 
                 if self.render_texture is None or self.render_texture.width != surface_texture.width or self.render_texture.height != surface_texture.height:
@@ -380,7 +251,7 @@ class App:
                         "label": "depth_texture_view"
                     })
 
-                self.renderer.render(command_encoder, self.simulator, self.camera, surface_texture.width, surface_texture.height, self.render_texture_view, self.depth_texture_view)
+                self.renderer.render(command_encoder, self.camera, surface_texture.width, surface_texture.height, self.render_texture_view, self.depth_texture_view)
 
                 self.tonemapper.dispatch(
                     thread_count=[self.render_texture.width, self.render_texture.height, 1],
