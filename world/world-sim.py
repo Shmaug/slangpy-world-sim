@@ -1,6 +1,5 @@
 import os
 import slangpy as spy
-import math
 import numpy as np
 from Camera import Camera, InputState
 
@@ -139,7 +138,7 @@ class App:
     def __init__(self):
         super().__init__()
         self.device = spy.create_device(include_paths=[os.path.abspath("."), os.path.abspath("src")])
-        self.window = spy.Window(width=800, height=600, title="App", resizable=True)
+        self.window = spy.Window(width=1400, height=(1400*9)//16, title="App", resizable=True)
         self.surface = self.device.create_surface(self.window)
         self.surface.configure({
             "width":  self.window.width,
