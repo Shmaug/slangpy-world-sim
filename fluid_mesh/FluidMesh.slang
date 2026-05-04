@@ -1,24 +1,5 @@
 import Math;
 
-float2 compute_barycentrics(float3 pos, float3 v0, float3 v1, float3 v2)
-{
-    float3 v0v1 = v1 - v0;
-    float3 v0v2 = v2 - v0;
-    float3 v0p = pos - v0;
-    
-    float dot00 = dot(v0v1, v0v1);
-    float dot01 = dot(v0v1, v0v2);
-    float dot02 = dot(v0v1, v0p);
-    float dot11 = dot(v0v2, v0v2);
-    float dot12 = dot(v0v2, v0p);
-    
-    float inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
-    float u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
-    float v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
-    
-    return float2(u, v);
-}
-
 struct FluidMesh
 {
     ByteAddressBuffer vertices;
@@ -49,32 +30,6 @@ struct FluidMesh
     uint3 load_indices(uint triangle_index)
     {
         return indices.Load3(triangle_index * sizeof(uint3));
-    }
-
-    uint3 get_triangle(float3 pos, out float2 bary)
-    {
-        for (uint i = 0; i < num_triangles; i++)
-        {
-            uint3 tri = load_indices(i);
-            float3 v0 = load_vertex(tri.x);
-            float3 v1 = load_vertex(tri.y);
-            float3 v2 = load_vertex(tri.z);
-            
-            if (dot((v0 + v1 + v2) / 3.0, pos) < 0)
-                continue;
-            
-            float3 n = normalize(cross(v1 - v0, v2 - v0));
-            float3 p = pos - n * dot(pos - v0, n); // project to plane
-
-            bary = compute_barycentrics(p, v0, v1, v2);
-
-            if (bary.x >= 0 && bary.y >= 0 && bary.x + bary.y <= 1)
-            {
-                return tri;
-            }
-        }
-        
-        return -1;
     }
 };
 

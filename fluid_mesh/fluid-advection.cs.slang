@@ -4,6 +4,25 @@ import FluidMesh;
 uniform FluidMesh mesh;
 uniform float dt;
 
+float2 compute_barycentrics(float3 pos, float3 v0, float3 v1, float3 v2)
+{
+    float3 v0v1 = v1 - v0;
+    float3 v0v2 = v2 - v0;
+    float3 v0p = pos - v0;
+    
+    float dot00 = dot(v0v1, v0v1);
+    float dot01 = dot(v0v1, v0v2);
+    float dot02 = dot(v0v1, v0p);
+    float dot11 = dot(v0v2, v0v2);
+    float dot12 = dot(v0v2, v0p);
+    
+    float inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
+    float u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
+    float v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
+    
+    return float2(u, v);
+}
+
 // compute (L @ psi) / A
 [shader("compute")]
 [numthreads(32, 1, 1)]
@@ -42,22 +61,55 @@ void advect(uint3 thread: SV_DispatchThreadID)
     // advect backwards + project to sphere
     float3 pos = normalize(vertex - velocity * dt);
 
+    float vorticity = 0;
+    float smoke = 0;
+
+    bool found = false;
+    uint3 tri;
     float2 bary;
-    uint3 tri = mesh.get_triangle(pos, bary);
+    for (uint i = 0; i < mesh.num_triangles; i++)
+    {
+        tri = mesh.load_indices(i);
 
-    float w0 = mesh.vorticity[tri.x];
-    float w1 = mesh.vorticity[tri.y];
-    float w2 = mesh.vorticity[tri.z];
-    
-    float smoke0 = mesh.smoke[tri.x];
-    float smoke1 = mesh.smoke[tri.y];
-    float smoke2 = mesh.smoke[tri.z];
+        float3 v0 = mesh.load_vertex(tri.x);
+        float3 v1 = mesh.load_vertex(tri.y);
+        float3 v2 = mesh.load_vertex(tri.z);
+        
+        if (dot((v0 + v1 + v2) / 3.0, pos) < 0)
+            continue;
+        
+        float3 n = normalize(cross(v1 - v0, v2 - v0));
+        float3 p = pos - n * dot(pos - v0, n); // project to plane
 
-    float w = w0 + (w1 - w0) * bary.x + (w2 - w0) * bary.y;
-    float smoke = smoke0 + (smoke1 - smoke0) * bary.x + (smoke2 - smoke0) * bary.y;
+        bary = compute_barycentrics(pos, v0, v1, v2);
+
+        if (bary.x >= 0 && bary.y >= 0 && bary.x + bary.y <= 1)
+        {
+            found = true;
+            break;
+        }
+    }
+    if (found)
+    {
+        float w0 = mesh.vorticity[tri.x];
+        float w1 = mesh.vorticity[tri.y];
+        float w2 = mesh.vorticity[tri.z];
+        
+        float smoke0 = mesh.smoke[tri.x];
+        float smoke1 = mesh.smoke[tri.y];
+        float smoke2 = mesh.smoke[tri.z];
+        
+        vorticity = w0 + (w1 - w0) * bary.x + (w2 - w0) * bary.y;
+        smoke = smoke0 + (smoke1 - smoke0) * bary.x + (smoke2 - smoke0) * bary.y;
+    }
+    else
+    {
+        vorticity = mesh.vorticity[vertex_index];
+        smoke = mesh.smoke[vertex_index];
+    }
     
     mesh.smoke_rw[vertex_index] = smoke;
-    mesh.vorticity_rw[vertex_index] = w;
+    mesh.vorticity_rw[vertex_index] = vorticity;
 }
 
 [shader("compute")]
