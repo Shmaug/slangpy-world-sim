@@ -126,3 +126,30 @@ float bspline(float r) {
     if (r < 1.5) return 0.5 * (1.5 - r) * (1.5 - r);
     return 0.0;
 }
+
+float2x2 inverse(float2x2 M)
+{
+    float2x2 inv;
+    float invdet = 1.0f / determinant(M);
+    inv[0][0] = M[1][1] * invdet;
+    inv[1][1] = M[0][0] * invdet;
+    inv[0][1] = -M[0][1] * invdet;
+    inv[1][0] = -M[1][0] * invdet;
+    return inv;
+}
+
+float3x3 inverse(float3x3 M)
+{
+    float3x3 inv;
+    float invdet = 1.0f / determinant(M);
+    inv[0][0] = (M[1][1] * M[2][2] - M[2][1] * M[1][2]) * invdet;
+    inv[0][1] = (M[0][2] * M[2][1] - M[0][1] * M[2][2]) * invdet;
+    inv[0][2] = (M[0][1] * M[1][2] - M[0][2] * M[1][1]) * invdet;
+    inv[1][0] = (M[1][2] * M[2][0] - M[1][0] * M[2][2]) * invdet;
+    inv[1][1] = (M[0][0] * M[2][2] - M[0][2] * M[2][0]) * invdet;
+    inv[1][2] = (M[1][0] * M[0][2] - M[0][0] * M[1][2]) * invdet;
+    inv[2][0] = (M[1][0] * M[2][1] - M[2][0] * M[1][1]) * invdet;
+    inv[2][1] = (M[2][0] * M[0][1] - M[0][0] * M[2][1]) * invdet;
+    inv[2][2] = (M[0][0] * M[1][1] - M[1][0] * M[0][1]) * invdet;
+    return inv;
+}
