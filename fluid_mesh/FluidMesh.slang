@@ -34,7 +34,7 @@ struct FluidMesh
     }
 };
 
-float3 compute_velocity(FluidMesh mesh, uint vertex_index, float3 vertex)
+float3 compute_velocity_at_vertex(FluidMesh mesh, uint vertex_index, float3 vertex)
 {
     float psi = mesh.psi[vertex_index];
     float3 normal = normalize(vertex);

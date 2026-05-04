@@ -66,7 +66,7 @@ void advect(uint3 thread: SV_DispatchThreadID)
         return;
     
     float3 vertex = mesh.load_vertex(vertex_index);
-    float3 velocity = compute_velocity(mesh, vertex_index, vertex);
+    float3 velocity = compute_velocity_at_vertex(mesh, vertex_index, vertex);
 
     // advect backwards + project to sphere
     float3 pos = normalize(vertex - velocity * dt);

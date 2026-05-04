@@ -36,7 +36,7 @@ v2f vs(uint vertexId: SV_VertexID)
             o.value = mesh.smoke[index];
             break;
         case RenderMode::Velocity:
-            o.value = compute_velocity(mesh, index, vertex);
+            o.value = compute_velocity_at_vertex(mesh, index, vertex);
             break;
         case RenderMode::Streamfunction:
             o.value = mesh.psi[index];
