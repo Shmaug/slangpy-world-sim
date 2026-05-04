@@ -1,11 +1,10 @@
 import slangpy as spy
-import pyobjloader
 import numpy as np
 import os
 from collections import defaultdict
 
 class MeshFluidSimulator:
-    def __init__(self, device:spy.Device, obj_file:str):
+    def __init__(self, device:spy.Device, vertices, indices):
         self.device = device
 
         def get_path(p):
@@ -16,11 +15,6 @@ class MeshFluidSimulator:
         self.compute_streamfunction_jacobi_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["vorticity_to_streamfunction_jacobi"]))
         self.compute_streamfunction_gauss_seidel_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["vorticity_to_streamfunction_gauss_seidel"]))
 
-        model = pyobjloader.load_model(obj_file)
-
-        vertices = np.array(model.vertex_points, dtype=np.float32)
-        indices  = np.array(model.point_indices, dtype=np.uint32)
-
         self.num_vertices  = vertices.shape[0]
         self.num_triangles = indices.shape[0]
 
@@ -28,9 +22,6 @@ class MeshFluidSimulator:
 
         # Preprocess mesh: compute adjacencies, laplacian weights, and vertex barycentric areas
 
-        def edge_key(i0,i1):
-            return (np.uint64(min(i0,i1)) << 32) | np.uint64(max(i0,i1))
-        
         print("Computing adjacencies")
 
         # compute adjacencies
@@ -55,7 +46,7 @@ class MeshFluidSimulator:
 
         print("Computing laplacian")
 
-        # compute laplacian
+        # compute laplacian edge weights
 
         i0s = indices[:, 0]
         i1s = indices[:, 1]
@@ -79,6 +70,7 @@ class MeshFluidSimulator:
         c2s = np.sum(-e0s * e1s, axis=1) / np.linalg.norm(np.cross(e0s, e1s), axis=1)
         
         edge_weights_dict = defaultdict(float)
+        edge_key = lambda i0,i1: (np.uint64(min(i0,i1)) << 32) | np.uint64(max(i0,i1))
         for i, j, c in zip(i1s, i2s, c0s):
             edge_weights_dict[edge_key(i, j)] += c
         for i, j, c in zip(i0s, i2s, c1s):
@@ -86,6 +78,15 @@ class MeshFluidSimulator:
         for i, j, c in zip(i0s, i1s, c2s):
             edge_weights_dict[edge_key(i, j)] += c
         
+        max_deg = np.max([len(a) for a in adjacencies_list])
+        print("max deg", max_deg)
+        adjacencies  = np.full(shape=(len(vertices), max_deg), fill_value=0xFFFFFFFF, dtype=np.uint32)
+        edge_weights = np.zeros(shape=(len(vertices), max_deg), dtype=np.float32)
+        for v in range(len(vertices)):
+            for i,n in enumerate(adjacencies_list[v]):
+                adjacencies[v,i]  = n
+                edge_weights[v,i] = edge_weights_dict[edge_key(v,n)]
+
         # compute area weights
         
         area_weights = np.zeros(self.num_vertices, dtype=np.float32)
@@ -122,15 +123,6 @@ class MeshFluidSimulator:
         assert(front_idx + back_idx == len(vertices))
         self.color_range = front_idx
         
-        max_deg = np.max([len(a) for a in adjacencies_list])
-        print("max deg", max_deg)
-        adjacencies  = np.full(shape=(len(vertices), max_deg), fill_value=0xFFFFFFFF, dtype=np.uint32)
-        edge_weights = np.zeros(shape=(len(vertices), max_deg), dtype=np.float32)
-        for v in range(len(vertices)):
-            for i,n in enumerate(adjacencies_list[v]):
-                adjacencies[v,i]  = n
-                edge_weights[v,i] = edge_weights_dict[edge_key(v,n)]
-
         print("Done preprocessing")
 
         self.mesh_vars = {
