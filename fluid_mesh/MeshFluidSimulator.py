@@ -18,9 +18,6 @@ class MeshFluidSimulator:
 
         model = pyobjloader.load_model(obj_file)
 
-        assert(len(model.vertex_points.flatten()) <= 0xFFFF)
-        assert((model.point_indices <= 0xFFFF).all())
-
         vertices = np.array(model.vertex_points, dtype=np.float32)
         indices  = np.array(model.point_indices, dtype=np.uint32)
 
@@ -33,19 +30,19 @@ class MeshFluidSimulator:
 
         def edge_key(i0,i1):
             return (np.uint64(min(i0,i1)) << 32) | np.uint64(max(i0,i1))
+        
+        print("Computing adjacencies")
+
+        # compute adjacencies
 
         adjacencies_list = []
         for _ in range(self.num_vertices):
             adjacencies_list.append(set())
-        area_weights = np.zeros(self.num_vertices, dtype=np.float32)
-        edge_weights_dict = defaultdict(float)
         for tri in indices:
             assert(tri.shape[0] == 3)
             i0 = tri[0]
             i1 = tri[1]
             i2 = tri[2]
-
-            # adjacencies
 
             adjacencies_list[i0].add(i1)
             adjacencies_list[i1].add(i0)
@@ -56,48 +53,50 @@ class MeshFluidSimulator:
             adjacencies_list[i2].add(i1)
             adjacencies_list[i1].add(i2)
 
-            # laplacian weights
+        print("Computing laplacian")
 
-            #      0
-            # e2 /   \ e1
-            #   1 --- 2
-            #     e0
+        # compute laplacian
 
-            v0 = vertices[i0]
-            v1 = vertices[i1]
-            v2 = vertices[i2]
+        i0s = indices[:, 0]
+        i1s = indices[:, 1]
+        i2s = indices[:, 2]
+        
+        v0s = vertices[i0s]
+        v1s = vertices[i1s]
+        v2s = vertices[i2s]
+        
+        e0s = v2s - v1s
+        e1s = v0s - v2s
+        e2s = v1s - v0s
+        e0s /= np.linalg.norm(e0s, axis=1, keepdims=True)
+        e1s /= np.linalg.norm(e1s, axis=1, keepdims=True)
+        e2s /= np.linalg.norm(e2s, axis=1, keepdims=True)
+        
+        # compute cotangent weights
 
-            e0 = v2 - v1
-            e1 = v0 - v2
-            e2 = v1 - v0
-
-            e0 /= np.linalg.norm(e0)
-            e1 /= np.linalg.norm(e1)
-            e2 /= np.linalg.norm(e2)
-            c0 = np.dot(-e1,e2) / np.linalg.norm( np.linalg.cross(e1,e2) )
-            c1 = np.dot(-e2,e0) / np.linalg.norm( np.linalg.cross(e2,e0) )
-            c2 = np.dot(-e0,e1) / np.linalg.norm( np.linalg.cross(e0,e1) )
-
-            edge_weights_dict[edge_key(i1,i2)] += c0
-            edge_weights_dict[edge_key(i0,i2)] += c1
-            edge_weights_dict[edge_key(i0,i1)] += c2
-
-            # area weights
-
-            tri_area = np.linalg.norm( np.linalg.cross(e0, e1) ) / 2.0
-            area_weights[i0] += tri_area/3.0
-            area_weights[i1] += tri_area/3.0
-            area_weights[i2] += tri_area/3.0
+        c0s = np.sum(-e1s * e2s, axis=1) / np.linalg.norm(np.cross(e1s, e2s), axis=1)
+        c1s = np.sum(-e2s * e0s, axis=1) / np.linalg.norm(np.cross(e2s, e0s), axis=1)
+        c2s = np.sum(-e0s * e1s, axis=1) / np.linalg.norm(np.cross(e0s, e1s), axis=1)
+        
+        edge_weights_dict = defaultdict(float)
+        for i, j, c in zip(i1s, i2s, c0s):
+            edge_weights_dict[edge_key(i, j)] += c
+        for i, j, c in zip(i0s, i2s, c1s):
+            edge_weights_dict[edge_key(i, j)] += c
+        for i, j, c in zip(i0s, i1s, c2s):
+            edge_weights_dict[edge_key(i, j)] += c
+        
+        # compute area weights
+        
+        area_weights = np.zeros(self.num_vertices, dtype=np.float32)
+        tri_areas = np.linalg.norm(np.cross(v0s - v1s, v2s - v1s), axis=1) / 2.0
+        np.add.at(area_weights, i0s, tri_areas / 3.0)
+        np.add.at(area_weights, i1s, tri_areas / 3.0)
+        np.add.at(area_weights, i2s, tri_areas / 3.0)
 
         assert((np.array([w for w in edge_weights_dict.values()]) > 0).all())
 
-        max_deg = np.max([len(a) for a in adjacencies_list])
-        adjacencies  = np.full(shape=(len(vertices), max_deg), fill_value=0xFFFFFFFF, dtype=np.uint32)
-        edge_weights = np.zeros(shape=(len(vertices), max_deg), dtype=np.float32)
-        for v in range(len(vertices)):
-            for i,n in enumerate(adjacencies_list[v]):
-                adjacencies[v,i]  = n
-                edge_weights[v,i] = edge_weights_dict[edge_key(v,n)]
+        print("Computing red-black coloring")
 
         # compute red-black coloring for gauss-siedel
         colored_vertices = np.empty(self.num_vertices, dtype=np.uint32)
@@ -120,10 +119,20 @@ class MeshFluidSimulator:
                     else:
                         colored_vertices[-back_idx - 1] = j
                         back_idx += 1
-        print(front_idx, back_idx)
         assert(front_idx + back_idx == len(vertices))
         self.color_range = front_idx
         
+        max_deg = np.max([len(a) for a in adjacencies_list])
+        print("max deg", max_deg)
+        adjacencies  = np.full(shape=(len(vertices), max_deg), fill_value=0xFFFFFFFF, dtype=np.uint32)
+        edge_weights = np.zeros(shape=(len(vertices), max_deg), dtype=np.float32)
+        for v in range(len(vertices)):
+            for i,n in enumerate(adjacencies_list[v]):
+                adjacencies[v,i]  = n
+                edge_weights[v,i] = edge_weights_dict[edge_key(v,n)]
+
+        print("Done preprocessing")
+
         self.mesh_vars = {
             "vertices":         device.create_buffer(usage=spy.BufferUsage.shader_resource, data=vertices),
             "indices":          device.create_buffer(usage=spy.BufferUsage.shader_resource, data=indices),
