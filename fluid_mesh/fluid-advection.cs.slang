@@ -141,8 +141,8 @@ void vorticity_to_streamfunction_jacobi(uint3 thread: SV_DispatchThreadID)
         sum  += w * mesh.psi[neighbor_index];
         diag += w;
     }
-    
-    mesh.psi_rw[vertex_index] = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;
+    float new_psi = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;
+    mesh.psi_rw[vertex_index] = new_psi;
 }
 
 [shader("compute")]
@@ -152,7 +152,6 @@ void vorticity_to_streamfunction_gauss_seidel(uint3 thread: SV_DispatchThreadID)
     uint thread_index = color_range.x + thread.y * 4096 + thread.x;
     if (thread_index >= color_range.y)
         return;
-
     uint vertex_index = mesh.colored_vertices[thread_index];
 
     // pin vertex 0 to fix gauge
@@ -175,7 +174,6 @@ void vorticity_to_streamfunction_gauss_seidel(uint3 thread: SV_DispatchThreadID)
         diag += w;
     }
     float new_psi = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;
-
     float psi = mesh.psi_rw[vertex_index];
-    mesh.psi_rw[vertex_index] = psi + omega_sor * (new_psi - psi);
+    mesh.psi_rw[vertex_index] = lerp(psi, new_psi, omega_sor);
 }
