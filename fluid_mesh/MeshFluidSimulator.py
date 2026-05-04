@@ -13,7 +13,8 @@ class MeshFluidSimulator:
         self.emit_kernel   = device.create_compute_kernel(device.load_program(get_path("fluid-init.cs.slang"), ["emit_plume"]))
         self.advect_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["advect"]))
         self.compute_vorticity_kernel      = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["streamfunction_to_vorticity"]))
-        self.compute_streamfunction_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["vorticity_to_streamfunction"]))
+        self.compute_streamfunction_jacobi_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["vorticity_to_streamfunction_jacobi"]))
+        self.compute_streamfunction_gauss_seidel_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["vorticity_to_streamfunction_gauss_seidel"]))
 
         model = pyobjloader.load_model(obj_file)
 
@@ -27,6 +28,8 @@ class MeshFluidSimulator:
         self.num_triangles = indices.shape[0]
 
         print(f"{self.num_vertices} vertices {self.num_triangles} triangles")
+
+        # Preprocess mesh: compute adjacencies, laplacian weights, and vertex barycentric areas
 
         def edge_key(i0,i1):
             return (np.uint64(min(i0,i1)) << 32) | np.uint64(max(i0,i1))
@@ -96,18 +99,44 @@ class MeshFluidSimulator:
                 adjacencies[v,i]  = n
                 edge_weights[v,i] = edge_weights_dict[edge_key(v,n)]
 
+        # compute red-black coloring for gauss-siedel
+        colored_vertices = np.empty(self.num_vertices, dtype=np.uint32)
+        colored_vertices[0] = 0
+        front_idx = 1
+        back_idx = 0
+        color = -np.ones(self.num_vertices, dtype=np.int8)
+        color[0] = 0
+        queue = [0]
+        while queue:
+            i = queue.pop()
+            for j in adjacencies_list[i]:
+                if color[j] == -1:
+                    c = 1 - color[i]
+                    color[j] = c
+                    queue.append(j)
+                    if c == 0:
+                        colored_vertices[front_idx] = j
+                        front_idx += 1
+                    else:
+                        colored_vertices[-back_idx - 1] = j
+                        back_idx += 1
+        print(front_idx, back_idx)
+        assert(front_idx + back_idx == len(vertices))
+        self.color_range = front_idx
+        
         self.mesh_vars = {
-            "vertices":        device.create_buffer(usage=spy.BufferUsage.shader_resource, data=vertices),
-            "indices":         device.create_buffer(usage=spy.BufferUsage.shader_resource, data=indices),
-            "adjacencies":     device.create_buffer(usage=spy.BufferUsage.shader_resource, data=adjacencies),
-            "vertex_weights":  device.create_buffer(usage=spy.BufferUsage.shader_resource, data=area_weights),
-            "edge_weights":    device.create_buffer(usage=spy.BufferUsage.shader_resource, data=edge_weights),
-            "psi":             device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "psi_rw":          device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "vorticity":       device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "vorticity_rw":    device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "smoke":           device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "smoke_rw":        device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "vertices":         device.create_buffer(usage=spy.BufferUsage.shader_resource, data=vertices),
+            "indices":          device.create_buffer(usage=spy.BufferUsage.shader_resource, data=indices),
+            "adjacencies":      device.create_buffer(usage=spy.BufferUsage.shader_resource, data=adjacencies),
+            "colored_vertices": device.create_buffer(usage=spy.BufferUsage.shader_resource, data=colored_vertices),
+            "vertex_weights":   device.create_buffer(usage=spy.BufferUsage.shader_resource, data=area_weights),
+            "edge_weights":     device.create_buffer(usage=spy.BufferUsage.shader_resource, data=edge_weights),
+            "psi":              device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "psi_rw":           device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "vorticity":        device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "vorticity_rw":     device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "smoke":            device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "smoke_rw":         device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
             "num_vertices":    self.num_vertices,
             "num_triangles":   self.num_triangles,
             "num_adjacencies": adjacencies.shape[1],
@@ -115,10 +144,17 @@ class MeshFluidSimulator:
         self.reset = True
 
     def setup_ui(self, window:spy.ui.Widget):
+        self.step_once = False
         def reset_cb():
             self.reset = True
+        def step_cb():
+            self.step_once = True
+        self.paused = spy.ui.CheckBox(window, "Pause")
+        spy.ui.Button(window, "Step", callback=step_cb)
         self.reset_button = spy.ui.Button(window, "Reset", callback=reset_cb)
-        self.jacobi_iterations = spy.ui.DragInt(window, "Jacobi iterations", value=20)
+        self.solver = spy.ui.ComboBox(window, "Solver", 0, items=["Jacobi", "Gauss-Seidel"])
+        self.jacobi_iterations = spy.ui.DragInt(window, "Jacobi iterations", value=500)
+        self.overrelaxation = spy.ui.SliderFloat(window, "Overrelaxation", value=1.25, min=1, max=2)
         self.dt = spy.ui.DragFloat(window, "Timestep", 0.01)
         self.emit_plume = spy.ui.CheckBox(window, "Emit plume")
 
@@ -131,6 +167,10 @@ class MeshFluidSimulator:
                 command_encoder.clear_buffer(self.mesh_vars[n])
                 command_encoder.clear_buffer(self.mesh_vars[f"{n}_rw"])
             self.reset = False
+
+        if self.paused.value and not self.step_once:
+            return
+        self.step_once = False
 
         # compute vorticity from streamfunction
         self.compute_vorticity_kernel.dispatch(
@@ -155,15 +195,30 @@ class MeshFluidSimulator:
 
         # compute streamfunction from advected vorticity
         command_encoder.clear_buffer(self.mesh_vars["psi_rw"])
-        for _ in range(self.jacobi_iterations.value):
-            swap("psi")
-            self.compute_streamfunction_kernel.dispatch(
-                [4096, (self.num_vertices + 4095) // 4096, 1],
-                vars={
-                    "mesh": self.mesh_vars,
-                },
-                command_encoder=command_encoder
-            )
+        if self.solver.value == 0:
+            # Jacobi
+            for _ in range(self.jacobi_iterations.value):
+                swap("psi")
+                self.compute_streamfunction_jacobi_kernel.dispatch(
+                    [4096, (self.num_vertices + 4095) // 4096, 1],
+                    vars={
+                        "mesh": self.mesh_vars,
+                    },
+                    command_encoder=command_encoder
+                )
+        else:
+            # Gauss-Seidel
+            for _ in range(self.jacobi_iterations.value):
+                for r in [ [0, self.color_range], [self.color_range, self.num_vertices] ]:
+                    self.compute_streamfunction_gauss_seidel_kernel.dispatch(
+                        [4096, ((r[1] - r[0]) + 4095) // 4096, 1],
+                        vars={
+                            "mesh": self.mesh_vars,
+                            "omega_sor": self.overrelaxation.value,
+                            "color_range": r
+                        },
+                        command_encoder=command_encoder
+                    )
 
         if self.emit_plume.value:
             self.emit_kernel.dispatch(

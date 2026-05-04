@@ -3,6 +3,8 @@ import FluidMesh;
 
 uniform FluidMesh mesh;
 uniform float dt;
+uniform float omega_sor;
+uniform uint2 color_range;
 
 float2 compute_barycentrics(float3 pos, float3 v0, float3 v1, float3 v2)
 {
@@ -114,7 +116,7 @@ void advect(uint3 thread: SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(32, 1, 1)]
-void vorticity_to_streamfunction(uint3 thread: SV_DispatchThreadID)
+void vorticity_to_streamfunction_jacobi(uint3 thread: SV_DispatchThreadID)
 {
     uint vertex_index = thread.y * 4096 + thread.x;
     if (vertex_index >= mesh.num_vertices)
@@ -141,4 +143,39 @@ void vorticity_to_streamfunction(uint3 thread: SV_DispatchThreadID)
     }
     
     mesh.psi_rw[vertex_index] = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;
+}
+
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void vorticity_to_streamfunction_gauss_seidel(uint3 thread: SV_DispatchThreadID)
+{
+    uint thread_index = color_range.x + thread.y * 4096 + thread.x;
+    if (thread_index >= color_range.y)
+        return;
+
+    uint vertex_index = mesh.colored_vertices[thread_index];
+
+    // pin vertex 0 to fix gauge
+    if (vertex_index == 0)
+    {
+        mesh.psi_rw[vertex_index] = 0;
+        return;
+    }
+
+    float sum = 0;
+    float diag = 0;
+    for (uint i = 0; i < mesh.num_adjacencies; i++)
+    {
+        uint neighbor_index = mesh.adjacencies[vertex_index * mesh.num_adjacencies + i];
+        if (neighbor_index >= mesh.num_vertices)
+            break;
+
+        float w = mesh.edge_weights[vertex_index * mesh.num_adjacencies + i];
+        sum  += w * mesh.psi_rw[neighbor_index];
+        diag += w;
+    }
+    float new_psi = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;
+
+    float psi = mesh.psi_rw[vertex_index];
+    mesh.psi_rw[vertex_index] = psi + omega_sor * (new_psi - psi);
 }

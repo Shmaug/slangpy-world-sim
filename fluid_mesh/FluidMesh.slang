@@ -5,15 +5,16 @@ struct FluidMesh
     ByteAddressBuffer vertices;
     ByteAddressBuffer indices; // 32 bit
     StructuredBuffer<uint>  adjacencies; // list of adjacent vertices for each vertex
+    StructuredBuffer<uint>  colored_vertices; // concatenated red and black vertices for gauss-seidel
     StructuredBuffer<float> vertex_weights; // barycentric area weight
     StructuredBuffer<float> edge_weights; // list of edge weights for each adjacency
+    
+    StructuredBuffer<float>   psi; // per-vertex streamfunction
+    RWStructuredBuffer<float> psi_rw;
     
     StructuredBuffer<float>   vorticity; // per-vertex vorticity
     RWStructuredBuffer<float> vorticity_rw;
 
-    StructuredBuffer<float>   psi; // per-vertex streamfunction
-    RWStructuredBuffer<float> psi_rw;
-    
     StructuredBuffer<float>   smoke; // per-vertex
     RWStructuredBuffer<float> smoke_rw;
 
