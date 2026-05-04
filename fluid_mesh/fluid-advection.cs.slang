@@ -47,6 +47,14 @@ void streamfunction_to_vorticity(uint3 thread: SV_DispatchThreadID)
     mesh.vorticity_rw[vertex_index] = (diag * mesh.psi[vertex_index] - lap) / mesh.vertex_weights[vertex_index];
 }
 
+float interpolate(StructuredBuffer<float> data, uint3 tri, float2 bary)
+{
+    float v0 = data[tri.x];
+    float v1 = data[tri.y];
+    float v2 = data[tri.z];
+    return v0 * (1 - bary.x - bary.y) + v1 * bary.x + v2 * bary.y;
+}
+
 [shader("compute")]
 [numthreads(32, 1, 1)]
 void advect(uint3 thread: SV_DispatchThreadID)
@@ -91,16 +99,8 @@ void advect(uint3 thread: SV_DispatchThreadID)
     }
     if (found)
     {
-        float w0 = mesh.vorticity[tri.x];
-        float w1 = mesh.vorticity[tri.y];
-        float w2 = mesh.vorticity[tri.z];
-        
-        float smoke0 = mesh.smoke[tri.x];
-        float smoke1 = mesh.smoke[tri.y];
-        float smoke2 = mesh.smoke[tri.z];
-        
-        vorticity = w0 + (w1 - w0) * bary.x + (w2 - w0) * bary.y;
-        smoke = smoke0 + (smoke1 - smoke0) * bary.x + (smoke2 - smoke0) * bary.y;
+        vorticity = interpolate(mesh.vorticity, tri, bary);
+        smoke = interpolate(mesh.smoke, tri, bary);
     }
     else
     {

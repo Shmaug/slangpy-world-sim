@@ -30,11 +30,11 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
         float gaussian = exp(-normalized_dist * normalized_dist * 4.0);
         
         // Create tangent basis at emission point
-        float3 t1 = normalize(cross(target_dir, target_pos));
+        float3 t1 = normalize(cross(target_pos, target_dir));
         float psi_target = dot(pos - target_pos, t1) * gaussian;
         
-        psi   = lerp(psi, psi_target, 0.9);
-        smoke = lerp(smoke, gaussian, 0.9);
+        psi   += psi_target;
+        smoke += gaussian;
     }
 
     mesh.smoke_rw[vertex_index] = smoke;
