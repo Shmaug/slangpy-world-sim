@@ -6,11 +6,34 @@ uniform float dt;
 uniform float omega_sor;
 uniform uint2 color_range;
 
-float2 compute_barycentrics(float3 pos, float3 v0, float3 v1, float3 v2)
+// stores vertices in columns
+matrix<float,N,3> load_face_vertices<let N : int>(FluidMesh mesh, vector<uint,N> indices)
 {
-    float3 v0v1 = v1 - v0;
-    float3 v0v2 = v2 - v0;
-    float3 v0p = pos - v0;
+    matrix<float,N,3> f;
+    [ForceUnroll]
+    for (uint i = 0; i < N; i++)
+        f[i] = mesh.load_vertex(indices[i]);
+    return f;
+}
+
+float3 face_centroid<let N : int>(matrix<float,N,3> vertices)
+{
+    float3 v = 0;
+    [ForceUnroll]
+    for (uint i = 0; i < N; i++)
+        v += vertices[i];
+    return v / 3.0;
+}
+
+float3 triangle_barycentrics(float3 pos, float3x3 vertices)
+{
+    // project pos to plane
+    float3 n = normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
+    float3 p = pos - n * dot(pos - vertices[0], n);
+
+    float3 v0v1 = vertices[1] - vertices[0];
+    float3 v0v2 = vertices[2] - vertices[0];
+    float3 v0p = p - vertices[0];
     
     float dot00 = dot(v0v1, v0v1);
     float dot01 = dot(v0v1, v0v2);
@@ -22,7 +45,20 @@ float2 compute_barycentrics(float3 pos, float3 v0, float3 v1, float3 v2)
     float u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
     float v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
     
-    return float2(u, v);
+    return float3(1 - u - v, u, v);
+}
+
+float interpolate<let N : int>(StructuredBuffer<float> data, vector<uint,N> face, vector<float,N> bary)
+{
+    vector<float, N> v_data;
+    [ForceUnroll]
+    for (uint i = 0; i < N; i++)
+        v_data[i] = data[face[i]];
+    float v = 0;
+    [ForceUnroll]
+    for (uint i = 0; i < N; i++)
+        v += bary[i] * v_data[i];
+    return v;
 }
 
 // compute (L @ psi) / A
@@ -49,14 +85,6 @@ void streamfunction_to_vorticity(uint3 thread: SV_DispatchThreadID)
     mesh.vorticity_rw[vertex_index] = (diag * mesh.psi[vertex_index] - lap) / mesh.vertex_weights[vertex_index];
 }
 
-float interpolate(StructuredBuffer<float> data, uint3 tri, float2 bary)
-{
-    float v0 = data[tri.x];
-    float v1 = data[tri.y];
-    float v2 = data[tri.z];
-    return v0 * (1 - bary.x - bary.y) + v1 * bary.x + v2 * bary.y;
-}
-
 [shader("compute")]
 [numthreads(32, 1, 1)]
 void advect(uint3 thread: SV_DispatchThreadID)
@@ -75,39 +103,34 @@ void advect(uint3 thread: SV_DispatchThreadID)
     float smoke = 0;
 
     bool found = false;
-    uint3 tri;
-    float2 bary;
-    for (uint i = 0; i < mesh.num_triangles; i++)
+    uint3 face;
+    float3 bary;
+    for (uint i = 0; i < mesh.num_faces; i++)
     {
-        tri = mesh.load_indices(i);
-
-        float3 v0 = mesh.load_vertex(tri.x);
-        float3 v1 = mesh.load_vertex(tri.y);
-        float3 v2 = mesh.load_vertex(tri.z);
+        face = mesh.load_indices(i);
+        let vertices = load_face_vertices(mesh, face);
         
-        if (dot((v0 + v1 + v2) / 3.0, pos) < 0)
+        if (dot(face_centroid(vertices), pos) < 0)
             continue;
         
-        float3 n = normalize(cross(v1 - v0, v2 - v0));
-        float3 p = pos - n * dot(pos - v0, n); // project to plane
+        bary = triangle_barycentrics(pos, vertices);
 
-        bary = compute_barycentrics(pos, v0, v1, v2);
-
-        if (bary.x >= 0 && bary.y >= 0 && bary.x + bary.y <= 1)
+        if (all(bary >= 0) && dot(bary, 1) <= 1)
         {
             found = true;
             break;
         }
     }
+    
     if (found)
     {
-        vorticity = interpolate(mesh.vorticity, tri, bary);
-        smoke = interpolate(mesh.smoke, tri, bary);
+        vorticity = interpolate(mesh.vorticity, face, bary);
+        smoke     = interpolate(mesh.smoke, face, bary);
     }
     else
     {
         vorticity = mesh.vorticity[vertex_index];
-        smoke = mesh.smoke[vertex_index];
+        smoke     = mesh.smoke[vertex_index];
     }
     
     mesh.smoke_rw[vertex_index] = smoke;

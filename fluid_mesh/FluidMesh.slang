@@ -19,7 +19,7 @@ struct FluidMesh
     RWStructuredBuffer<float> smoke_rw;
 
     uniform uint num_vertices;
-    uniform uint num_triangles;
+    uniform uint num_faces;
     uniform uint num_adjacencies;
 
     float3 load_vertex(uint index)

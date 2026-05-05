@@ -3,25 +3,64 @@ import numpy as np
 import os
 from collections import defaultdict
 
+def edge_key(i0,i1):
+    return (np.uint64(min(i0,i1)) << 32) | np.uint64(max(i0,i1))
+
+def trimesh_laplacian(vertices:np.ndarray, indices:np.ndarray):
+    # compute laplacian edge weights
+
+    i0s = indices[:, 0]
+    i1s = indices[:, 1]
+    i2s = indices[:, 2]
+    
+    v0s = vertices[i0s]
+    v1s = vertices[i1s]
+    v2s = vertices[i2s]
+    
+    e0s = v2s - v1s
+    e1s = v0s - v2s
+    e2s = v1s - v0s
+    e0s /= np.linalg.norm(e0s, axis=1, keepdims=True)
+    e1s /= np.linalg.norm(e1s, axis=1, keepdims=True)
+    e2s /= np.linalg.norm(e2s, axis=1, keepdims=True)
+    
+    # compute cotangent weights
+
+    c0s = np.sum(-e1s * e2s, axis=1) / np.linalg.norm(np.cross(e1s, e2s), axis=1)
+    c1s = np.sum(-e2s * e0s, axis=1) / np.linalg.norm(np.cross(e2s, e0s), axis=1)
+    c2s = np.sum(-e0s * e1s, axis=1) / np.linalg.norm(np.cross(e0s, e1s), axis=1)
+    
+    edge_weights_dict = defaultdict(float)
+    for i, j, c in zip(i1s, i2s, c0s):
+        edge_weights_dict[edge_key(i, j)] += c
+    for i, j, c in zip(i0s, i2s, c1s):
+        edge_weights_dict[edge_key(i, j)] += c
+    for i, j, c in zip(i0s, i1s, c2s):
+        edge_weights_dict[edge_key(i, j)] += c
+    return edge_weights_dict
+
 class MeshFluidSimulator:
-    def __init__(self, device:spy.Device, vertices, indices):
+    def __init__(self, device:spy.Device, vertices:np.ndarray, indices:np.ndarray):
         self.device = device
 
-        def get_path(p):
-            return os.path.join(os.path.dirname(__file__), p)
-        self.emit_kernel   = device.create_compute_kernel(device.load_program(get_path("fluid-init.cs.slang"), ["emit_plume"]))
-        self.advect_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["advect"]))
-        self.compute_vorticity_kernel      = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["streamfunction_to_vorticity"]))
-        self.compute_streamfunction_jacobi_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["vorticity_to_streamfunction_jacobi"]))
-        self.compute_streamfunction_gauss_seidel_kernel = device.create_compute_kernel(device.load_program(get_path("fluid-advection.cs.slang"), ["vorticity_to_streamfunction_gauss_seidel"]))
+        def create_kernel(shader_file, entry):
+            path = os.path.join(os.path.dirname(__file__), shader_file)
+            return device.create_compute_kernel(device.load_program(path, [entry]))
+        self.emit_kernel = create_kernel("fluid-init.cs.slang", "emit_plume")
+        self.advect_kernel = create_kernel("fluid-advection.cs.slang", "advect")
+        self.compute_vorticity_kernel = create_kernel("fluid-advection.cs.slang", "streamfunction_to_vorticity")
+        self.compute_streamfunction_jacobi_kernel = create_kernel("fluid-advection.cs.slang", "vorticity_to_streamfunction_jacobi")
+        self.compute_streamfunction_gauss_seidel_kernel = create_kernel("fluid-advection.cs.slang", "vorticity_to_streamfunction_gauss_seidel")
 
-        self.num_vertices  = vertices.shape[0]
-        self.num_triangles = indices.shape[0]
+        self.num_vertices = vertices.shape[0]
+        self.num_faces    = indices.shape[0]
 
-        print(f"{self.num_vertices} vertices {self.num_triangles} triangles")
+        # Preprocess mesh
+        
+        print("Computing laplacian")
 
-        # Preprocess mesh: compute adjacencies, laplacian weights, and vertex barycentric areas
-
+        edge_weights_dict = trimesh_laplacian(vertices, indices)
+        
         print("Computing adjacencies")
 
         # compute adjacencies
@@ -29,57 +68,16 @@ class MeshFluidSimulator:
         adjacencies_list = []
         for _ in range(self.num_vertices):
             adjacencies_list.append(set())
-        for tri in indices:
-            assert(tri.shape[0] == 3)
-            i0 = tri[0]
-            i1 = tri[1]
-            i2 = tri[2]
+        for face in indices:
+            for i in range(len(face)):
+                i0 = face[i]
+                i1 = face[i-1]
+                adjacencies_list[i0].add(i1)
+                adjacencies_list[i1].add(i0)
 
-            adjacencies_list[i0].add(i1)
-            adjacencies_list[i1].add(i0)
-
-            adjacencies_list[i0].add(i2)
-            adjacencies_list[i2].add(i0)
-            
-            adjacencies_list[i2].add(i1)
-            adjacencies_list[i1].add(i2)
-
-        print("Computing laplacian")
-
-        # compute laplacian edge weights
-
-        i0s = indices[:, 0]
-        i1s = indices[:, 1]
-        i2s = indices[:, 2]
-        
-        v0s = vertices[i0s]
-        v1s = vertices[i1s]
-        v2s = vertices[i2s]
-        
-        e0s = v2s - v1s
-        e1s = v0s - v2s
-        e2s = v1s - v0s
-        e0s /= np.linalg.norm(e0s, axis=1, keepdims=True)
-        e1s /= np.linalg.norm(e1s, axis=1, keepdims=True)
-        e2s /= np.linalg.norm(e2s, axis=1, keepdims=True)
-        
-        # compute cotangent weights
-
-        c0s = np.sum(-e1s * e2s, axis=1) / np.linalg.norm(np.cross(e1s, e2s), axis=1)
-        c1s = np.sum(-e2s * e0s, axis=1) / np.linalg.norm(np.cross(e2s, e0s), axis=1)
-        c2s = np.sum(-e0s * e1s, axis=1) / np.linalg.norm(np.cross(e0s, e1s), axis=1)
-        
-        edge_weights_dict = defaultdict(float)
-        edge_key = lambda i0,i1: (np.uint64(min(i0,i1)) << 32) | np.uint64(max(i0,i1))
-        for i, j, c in zip(i1s, i2s, c0s):
-            edge_weights_dict[edge_key(i, j)] += c
-        for i, j, c in zip(i0s, i2s, c1s):
-            edge_weights_dict[edge_key(i, j)] += c
-        for i, j, c in zip(i0s, i1s, c2s):
-            edge_weights_dict[edge_key(i, j)] += c
-        
         max_deg = np.max([len(a) for a in adjacencies_list])
-        print("max deg", max_deg)
+        print(f"verts: {self.num_vertices}, prims: {self.num_faces}, max deg: {max_deg}")
+
         adjacencies  = np.full(shape=(len(vertices), max_deg), fill_value=0xFFFFFFFF, dtype=np.uint32)
         edge_weights = np.zeros(shape=(len(vertices), max_deg), dtype=np.float32)
         for v in range(len(vertices)):
@@ -90,10 +88,10 @@ class MeshFluidSimulator:
         # compute area weights
         
         area_weights = np.zeros(self.num_vertices, dtype=np.float32)
-        tri_areas = np.linalg.norm(np.cross(v0s - v1s, v2s - v1s), axis=1) / 2.0
-        np.add.at(area_weights, i0s, tri_areas / 3.0)
-        np.add.at(area_weights, i1s, tri_areas / 3.0)
-        np.add.at(area_weights, i2s, tri_areas / 3.0)
+        tri_areas = np.linalg.norm(np.cross(vertices[indices[:, 1]] - vertices[indices[:, 0]], vertices[indices[:, 2]] - vertices[indices[:, 0]]), axis=1) / 2.0
+        np.add.at(area_weights, indices[:, 0], tri_areas / 3.0)
+        np.add.at(area_weights, indices[:, 1], tri_areas / 3.0)
+        np.add.at(area_weights, indices[:, 2], tri_areas / 3.0)
 
         assert((np.array([w for w in edge_weights_dict.values()]) > 0).all())
 
@@ -138,9 +136,9 @@ class MeshFluidSimulator:
             "vorticity_rw":     device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
             "smoke":            device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
             "smoke_rw":         device.create_buffer(element_count=len(vertices), struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "num_vertices":    self.num_vertices,
-            "num_triangles":   self.num_triangles,
-            "num_adjacencies": adjacencies.shape[1],
+            "num_vertices":     self.num_vertices,
+            "num_faces":        self.num_faces,
+            "num_adjacencies":  adjacencies.shape[1],
         }
         self.reset = True
 
@@ -154,7 +152,7 @@ class MeshFluidSimulator:
         spy.ui.Button(window, "Step", callback=step_cb)
         self.reset_button = spy.ui.Button(window, "Reset", callback=reset_cb)
         self.solver = spy.ui.ComboBox(window, "Solver", 0, items=["Jacobi", "Gauss-Seidel"])
-        self.jacobi_iterations = spy.ui.DragInt(window, "Jacobi iterations", value=500)
+        self.jacobi_iterations = spy.ui.DragInt(window, "Jacobi iterations", value=10)
         self.overrelaxation = spy.ui.SliderFloat(window, "Overrelaxation", value=1.25, min=1, max=2)
         self.dt = spy.ui.DragFloat(window, "Timestep", 0.01)
         self.emit_plume = spy.ui.CheckBox(window, "Emit plume")

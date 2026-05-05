@@ -191,7 +191,7 @@ class App:
                 cursor["render_mode"] = self.render_mode.value
                 cursor["mesh"] = self.simulator.mesh_vars
 
-                pass_encoder.draw(spy.DrawArguments({"vertex_count": self.simulator.num_triangles * 3}))
+                pass_encoder.draw(spy.DrawArguments({"vertex_count": self.simulator.num_faces * 3}))
             
             command_encoder.blit(surface_texture, self.render_texture)
 
