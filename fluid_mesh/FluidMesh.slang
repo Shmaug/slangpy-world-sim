@@ -96,25 +96,6 @@ struct FluidMesh
 
     bool find_face(float3 pos, out uint3 face, out float3 bary)
     {
-        #if 0
-
-        // brute-force search
-        bool found = false;
-        for (uint i = 0; i < num_faces; i++)
-        {
-            face = load_indices(i);
-            float3x3 vertices = load_face_vertices(face);
-            
-            if (dot(triangle_centroid(vertices), pos) < 0)
-                continue;
-
-            if (in_spherical_triangle(pos, vertices))
-                return true;
-        }
-        return false;
-        
-        #else
-
         // acceleration structure search
 
         uint node_index = -1;
@@ -160,8 +141,6 @@ struct FluidMesh
 
         bary = triangle_barycentrics(pos, vertices);
         return true;
-
-        #endif
     }
 };
 
