@@ -6,58 +6,19 @@ uniform float dt;
 uniform float omega_sor;
 uniform uint2 color_range;
 
-// stores vertices in columns
-matrix<float,N,3> load_face_vertices<let N : int>(FluidMesh mesh, vector<uint,N> indices)
-{
-    matrix<float,N,3> f;
-    [ForceUnroll]
-    for (uint i = 0; i < N; i++)
-        f[i] = mesh.load_vertex(indices[i]);
-    return f;
-}
-
-float3 face_centroid<let N : int>(matrix<float,N,3> vertices)
-{
-    float3 v = 0;
-    [ForceUnroll]
-    for (uint i = 0; i < N; i++)
-        v += vertices[i];
-    return v / 3.0;
-}
-
-float3 triangle_barycentrics(float3 pos, float3x3 vertices)
-{
-    // project pos to plane
-    float3 n = normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
-    float3 p = pos - n * dot(pos - vertices[0], n);
-
-    float3 v0v1 = vertices[1] - vertices[0];
-    float3 v0v2 = vertices[2] - vertices[0];
-    float3 v0p = p - vertices[0];
-    
-    float dot00 = dot(v0v1, v0v1);
-    float dot01 = dot(v0v1, v0v2);
-    float dot02 = dot(v0v1, v0p);
-    float dot11 = dot(v0v2, v0v2);
-    float dot12 = dot(v0v2, v0p);
-    
-    float inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
-    float u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
-    float v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
-    
-    return float3(1 - u - v, u, v);
-}
-
 float interpolate<let N : int>(StructuredBuffer<float> data, vector<uint,N> face, vector<float,N> bary)
 {
     vector<float, N> v_data;
+
     [ForceUnroll]
     for (uint i = 0; i < N; i++)
         v_data[i] = data[face[i]];
+
     float v = 0;
     [ForceUnroll]
     for (uint i = 0; i < N; i++)
         v += bary[i] * v_data[i];
+
     return v;
 }
 
@@ -102,27 +63,9 @@ void advect(uint3 thread: SV_DispatchThreadID)
     float vorticity = 0;
     float smoke = 0;
 
-    bool found = false;
     uint3 face;
     float3 bary;
-    for (uint i = 0; i < mesh.num_faces; i++)
-    {
-        face = mesh.load_indices(i);
-        let vertices = load_face_vertices(mesh, face);
-        
-        if (dot(face_centroid(vertices), pos) < 0)
-            continue;
-        
-        bary = triangle_barycentrics(pos, vertices);
-
-        if (all(bary >= 0) && dot(bary, 1) <= 1)
-        {
-            found = true;
-            break;
-        }
-    }
-    
-    if (found)
+    if (mesh.find_face(pos, face, bary))
     {
         vorticity = interpolate(mesh.vorticity, face, bary);
         smoke     = interpolate(mesh.smoke, face, bary);

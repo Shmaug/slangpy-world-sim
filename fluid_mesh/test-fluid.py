@@ -1,6 +1,4 @@
 import slangpy as spy
-import pyobjloader
-import numpy as np
 import os
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
@@ -46,10 +44,7 @@ class App:
         self.render_texture = None
         self.fps_avg = 0
 
-        model = pyobjloader.load_model(os.path.join(os.path.dirname(__file__), os.pardir, "icosphere.obj"))
-        vertices = np.array(model.vertex_points, dtype=np.float32)
-        indices  = np.array(model.point_indices, dtype=np.uint32)
-        self.simulator = MeshFluidSimulator(self.device, vertices, indices)
+        self.simulator = MeshFluidSimulator(self.device)
         self.camera = Camera()
 
         self.render_pipeline = self.device.create_render_pipeline(
