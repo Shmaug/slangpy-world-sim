@@ -47,9 +47,8 @@ float3 triangle_centroid(float3x3 vertices)
 
 struct FluidMesh
 {
-    ByteAddressBuffer       node_vertex_indices;
-    StructuredBuffer<uint4> node_children;
-    StructuredBuffer<uint>  node_payloads;
+    ByteAddressBuffer      node_vertex_indices;
+    StructuredBuffer<uint> node_children;
 
     ByteAddressBuffer vertices;
     ByteAddressBuffer indices; // 32 bit
@@ -123,19 +122,19 @@ struct FluidMesh
 
         for (uint l = 1; l < levels; l++)
         {
-            uint4 children = node_children[node_index];
+            uint first_child = node_children[node_index];
             [ForceUnroll]
             for (uint j = 0; j < 4; j++)
             {
-                face = node_vertex_indices.Load3(children[j] * sizeof(uint3));
+                face = node_vertex_indices.Load3((first_child + j) * sizeof(uint3));
                 vertices = load_face_vertices(face);
                 if (in_spherical_triangle(pos, vertices))
                 {
-                    node_index = children[j];
+                    node_index = first_child + j;
                     break;
                 }
             }
-            if (!any(children == node_index))
+            if (node_index < first_child || node_index >= first_child + 4)
                 return false; // failed to select a child node
         }
 

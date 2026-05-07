@@ -130,8 +130,7 @@ class MeshFluidSimulator:
         ] ]
         
         tree_faces = [ [a,b,c] for a,b,c in indices ]
-        tree_children = [ np.full(4, 0xFFFFFFFF) for _ in range(len(tree_faces)) ]
-        tree_payloads = list(range(len(tree_faces)))
+        tree_children = [ 0xFFFFFFFF ] * len(tree_faces)
         last_nodes = list(range(len(tree_faces)))
 
         for _ in range(1, self.subdivision_level):
@@ -163,21 +162,20 @@ class MeshFluidSimulator:
 
                 # add new faces
 
+                tree_children[i] = len(tree_faces)
+
                 for j,new_face in enumerate([
                     [ i0, m0, m2 ],
                     [ m0, i1, m1 ],
                     [ m0, m1, m2 ],
                     [ m2, m1, i2 ]
                 ]):
-                    new_face_index = len(indices)
                     new_node_index = len(tree_faces)
                     # add face to mesh
                     indices.append(new_face)
                     # add node to tree
-                    tree_children[i][j] = new_node_index
                     tree_faces.append(new_face)
-                    tree_children.append(np.full(4, 0xFFFFFFFF))
-                    tree_payloads.append(new_face_index)
+                    tree_children.append(0xFFFFFFFF)
                     # track new nodes for next iteration
                     new_nodes.append(new_node_index)
             last_nodes = new_nodes
@@ -195,7 +193,6 @@ class MeshFluidSimulator:
         self.mesh_vars = {
             "node_vertex_indices": self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(tree_faces, dtype=np.uint32)),
             "node_children":       self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(tree_children, dtype=np.uint32)),
-            "node_payloads":       self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(tree_payloads, dtype=np.uint32)),
             "vertices":            self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=vertices),
             "indices":             self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=indices),
             "adjacencies":         self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=adjacencies),
