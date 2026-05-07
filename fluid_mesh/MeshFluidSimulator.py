@@ -51,11 +51,11 @@ def process_mesh(vertices:np.ndarray, indices:np.ndarray):
             adjacencies_list[i1].add(i0)
 
     max_deg = np.max([len(a) for a in adjacencies_list])
-    assert(max_deg <= 6)
     print(f"verts: {num_vertices}, prims: {indices.shape[0]}, max deg: {max_deg}")
+    assert(max_deg <= 6)
 
-    adjacencies  = np.full(shape=(num_vertices, max_deg), fill_value=0xFFFFFFFF, dtype=np.uint32)
-    edge_weights = np.zeros(shape=(num_vertices, max_deg), dtype=np.float32)
+    adjacencies  = np.full(shape=(num_vertices, 6), fill_value=0xFFFFFFFF, dtype=np.uint32)
+    edge_weights = np.zeros(shape=(num_vertices, 6), dtype=np.float32)
     for v in range(num_vertices):
         for i,n in enumerate(adjacencies_list[v]):
             adjacencies[v,i]  = n
@@ -64,10 +64,10 @@ def process_mesh(vertices:np.ndarray, indices:np.ndarray):
     print("Computing vertex area weights")
 
     area_weights = np.zeros(num_vertices, dtype=np.float32)
-    tri_areas = np.linalg.norm(np.cross(vertices[indices[:, 1]] - vertices[indices[:, 0]], vertices[indices[:, 2]] - vertices[indices[:, 0]]), axis=1) / 2.0
-    np.add.at(area_weights, indices[:, 0], tri_areas / 3.0)
-    np.add.at(area_weights, indices[:, 1], tri_areas / 3.0)
-    np.add.at(area_weights, indices[:, 2], tri_areas / 3.0)
+    tri_areas = np.linalg.norm(np.cross(v1s - v0s, v2s - v0s), axis=1) / 2.0
+    np.add.at(area_weights, i0s, tri_areas / 3.0)
+    np.add.at(area_weights, i1s, tri_areas / 3.0)
+    np.add.at(area_weights, i2s, tri_areas / 3.0)
 
     assert((np.array([w for w in edge_weights_dict.values()]) > 0).all())
 
@@ -79,13 +79,15 @@ class MeshFluidSimulator:
 
         def create_kernel(shader_file, entry):
             path = os.path.join(os.path.dirname(__file__), shader_file)
-            return device.create_compute_kernel(device.load_program(path, [entry]))
+            program = self.device.load_program(path, [entry])
+            return self.device.create_compute_kernel(program)
+        
         self.emit_kernel = create_kernel("fluid-init.cs.slang", "emit_plume")
         self.advect_kernel = create_kernel("fluid-advection.cs.slang", "advect")
         self.compute_vorticity_kernel = create_kernel("fluid-advection.cs.slang", "streamfunction_to_vorticity")
         self.compute_streamfunction_kernel = create_kernel("fluid-advection.cs.slang", "vorticity_to_streamfunction")
 
-        self.subdivision_level = 7
+        self.subdivision_levels = 7
         self.create_mesh()
 
     def create_mesh(self):
@@ -106,7 +108,8 @@ class MeshFluidSimulator:
             np.array([ 0.894425, 0.447215, 0.000000 ], dtype=np.float32),
             np.array([ 0.000000, 1.000000, 0.000000 ], dtype=np.float32),
         ]
-        indices = [ [a-1, b-1, c-1] for a,b,c in [
+        
+        faces = [ [a-1, b-1, c-1] for a,b,c in [
             [ 1, 2, 3 ],
             [ 2, 1, 6 ],
             [ 1, 3, 4 ],
@@ -128,17 +131,21 @@ class MeshFluidSimulator:
             [ 10, 9, 12 ],
             [ 11, 10, 12 ],
         ] ]
-        
-        tree_faces = [ [a,b,c] for a,b,c in indices ]
-        tree_children = [ 0xFFFFFFFF ] * len(tree_faces)
-        last_nodes = list(range(len(tree_faces)))
+        face_children = [ 0xFFFFFFFF ] * len(faces)
 
-        for _ in range(1, self.subdivision_level):
-            indices.clear()
-            new_nodes = []
+        level_faces = [ [ [a,b,c] for a,b,c in faces ] ]
+        level_face_offsets = [0]
+        level_vertex_offsets = [0]
+
+        adjacencies, edge_weights, area_weights = process_mesh(np.array(vertices, np.float32), np.array(level_faces[-1], np.uint32))
+
+        for _ in range(1, self.subdivision_levels):
+            new_faces = []
             edge_midpoints = {}
-            for i in last_nodes:
-                face = tree_faces[i]
+            level_vertex_offsets.append(adjacencies.shape[0])
+            level_face_offsets.append(len(faces))
+            for face_index in range(level_face_offsets[-2], level_face_offsets[-1]):
+                face = faces[face_index]
 
                 # add new vertices
                 for j in range(3):
@@ -151,6 +158,8 @@ class MeshFluidSimulator:
                         v /= np.linalg.norm(v) # project to sphere
                         vertices.append(v)
 
+                # add new faces
+
                 #     i0
                 #    /  \
                 #   m0 - m2
@@ -160,53 +169,51 @@ class MeshFluidSimulator:
                 i0,i1,i2 = face
                 m0,m1,m2 = edge_midpoints[edge_key(i0,i1)], edge_midpoints[edge_key(i1,i2)], edge_midpoints[edge_key(i2,i0)]
 
-                # add new faces
-
-                tree_children[i] = len(tree_faces)
-
-                for j,new_face in enumerate([
+                face_children[face_index] = len(faces)
+                for f in [
                     [ i0, m0, m2 ],
                     [ m0, i1, m1 ],
                     [ m0, m1, m2 ],
                     [ m2, m1, i2 ]
-                ]):
-                    new_node_index = len(tree_faces)
-                    # add face to mesh
-                    indices.append(new_face)
-                    # add node to tree
-                    tree_faces.append(new_face)
-                    tree_children.append(0xFFFFFFFF)
-                    # track new nodes for next iteration
-                    new_nodes.append(new_node_index)
-            last_nodes = new_nodes
+                ]:
+                    new_faces.append(f)
+                    faces.append(f)
+                    face_children.append(0xFFFFFFFF)
+            
+            level_faces.append(new_faces)
+
+            level_adjacencies, level_edge_weights, level_area_weights = process_mesh(np.array(vertices, np.float32), np.array(new_faces, np.uint32))
+
+            adjacencies = np.vstack((adjacencies, level_adjacencies))
+            edge_weights = np.vstack((edge_weights, level_edge_weights))
+            area_weights = np.hstack((area_weights, level_area_weights))
 
         vertices = np.array(vertices, np.float32)
-        indices = np.array(indices, np.uint32)
+        faces = np.array(faces, np.uint32)
+        face_children = np.array(face_children, np.uint32)
 
         self.num_vertices = vertices.shape[0]
-        self.num_faces = indices.shape[0]
+        self.num_faces = len(level_faces[-1])
 
-        adjacencies, edge_weights, area_weights = process_mesh(vertices, indices)
-        
         print("Done preprocessing")
 
-        self.mesh_vars = {
-            "node_vertex_indices": self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(tree_faces, dtype=np.uint32)),
-            "node_children":       self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(tree_children, dtype=np.uint32)),
-            "vertices":            self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=vertices),
-            "indices":             self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=indices),
-            "adjacencies":         self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=adjacencies),
-            "vertex_weights":      self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=area_weights),
-            "edge_weights":        self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=edge_weights),
-            "psi":                 self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "psi_rw":              self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "vorticity":           self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "vorticity_rw":        self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "smoke":               self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "smoke_rw":            self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
-            "num_vertices":        self.num_vertices,
-            "num_faces":           self.num_faces,
-            "levels": self.subdivision_level,
+        self.mesh_vars = {       
+            "vertices":       self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=vertices),
+            "faces":          self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=faces),
+            "face_children":  self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=face_children),
+            "face_offsets":   self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(level_face_offsets, np.uint32)),
+            "vertex_offsets": self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(level_vertex_offsets, np.uint32)),
+            "adjacencies":    self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=adjacencies),
+            "vertex_weights": self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=area_weights),
+            "edge_weights":   self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=edge_weights),
+            "psi":            self.device.create_buffer(element_count=adjacencies.shape[0], struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "psi_rw":         self.device.create_buffer(element_count=adjacencies.shape[0], struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "vorticity":      self.device.create_buffer(element_count=adjacencies.shape[0], struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "vorticity_rw":   self.device.create_buffer(element_count=adjacencies.shape[0], struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "smoke":          self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "smoke_rw":       self.device.create_buffer(element_count=self.num_vertices, struct_size=4, usage=spy.BufferUsage.shader_resource|spy.BufferUsage.unordered_access),
+            "num_vertices":   self.num_vertices,
+            "levels":         self.subdivision_levels,
         }
         self.reset = True
 
@@ -217,7 +224,7 @@ class MeshFluidSimulator:
         def step_cb():
             self.step_once = True
         def level_cb(value):
-            self.subdivision_level = self.subdivision_level_ui.value
+            self.subdivision_levels = min(max(1,self.subdivision_level_ui.value), 10)
             self.create_mesh()
         self.paused = spy.ui.CheckBox(window, "Pause")
         spy.ui.Button(window, "Step", callback=step_cb)
@@ -271,6 +278,7 @@ class MeshFluidSimulator:
                 [4096, (self.num_vertices + 4095) // 4096, 1],
                 vars={
                     "mesh": self.mesh_vars,
+                    "level": self.subdivision_levels-1
                 },
                 command_encoder=command_encoder
             )

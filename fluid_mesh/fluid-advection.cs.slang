@@ -3,7 +3,7 @@ import FluidMesh;
 
 uniform FluidMesh mesh;
 uniform float dt;
-uniform float omega_sor;
+uniform uint level;
 
 float interpolate<let N : int>(StructuredBuffer<float> data, vector<uint,N> face, vector<float,N> bary)
 {
@@ -29,17 +29,20 @@ void streamfunction_to_vorticity(uint3 thread: SV_DispatchThreadID)
     uint vertex_index = thread.y * 4096 + thread.x;
     if (vertex_index >= mesh.num_vertices)
         return;
-    
+
+    uint offset = mesh.vertex_offsets[mesh.levels-1];
+    vertex_index += offset;
+
     float lap  = 0;
     float diag = 0;
     for (uint i = 0; i < mesh.num_adjacencies; i++)
     {
         uint neighbor_index = mesh.adjacencies[vertex_index * mesh.num_adjacencies + i];
-        if (neighbor_index >= mesh.num_vertices)
+        if (neighbor_index == 0xFFFFFFFF)
             break;
 
         float w = mesh.edge_weights[vertex_index * mesh.num_adjacencies + i];
-        lap  += w * mesh.psi[neighbor_index];
+        lap  += w * mesh.psi[offset + neighbor_index];
         diag += w;
     }
     mesh.vorticity_rw[vertex_index] = (diag * mesh.psi[vertex_index] - lap) / mesh.vertex_weights[vertex_index];
@@ -52,9 +55,11 @@ void advect(uint3 thread: SV_DispatchThreadID)
     uint vertex_index = thread.y * 4096 + thread.x;
     if (vertex_index >= mesh.num_vertices)
         return;
-    
+
+    uint offset = mesh.vertex_offsets[mesh.levels-1];
+
     float3 vertex = mesh.load_vertex(vertex_index);
-    float3 velocity = compute_velocity_at_vertex(mesh, vertex_index, vertex);
+    float3 velocity = mesh.compute_velocity_at_vertex(vertex_index, vertex);
 
     // advect backwards + project to sphere
     float3 pos = normalize(vertex - velocity * dt);
@@ -66,17 +71,17 @@ void advect(uint3 thread: SV_DispatchThreadID)
     float3 bary;
     if (mesh.find_face(pos, face, bary))
     {
-        vorticity = interpolate(mesh.vorticity, face, bary);
+        vorticity = interpolate(mesh.vorticity, offset + face, bary);
         smoke     = interpolate(mesh.smoke, face, bary);
     }
     else
     {
-        vorticity = mesh.vorticity[vertex_index];
+        vorticity = mesh.vorticity[offset + vertex_index];
         smoke     = mesh.smoke[vertex_index];
     }
     
+    mesh.vorticity_rw[offset + vertex_index] = vorticity;
     mesh.smoke_rw[vertex_index] = smoke;
-    mesh.vorticity_rw[vertex_index] = vorticity;
 }
 
 [shader("compute")]
@@ -87,8 +92,11 @@ void vorticity_to_streamfunction(uint3 thread: SV_DispatchThreadID)
     if (vertex_index >= mesh.num_vertices)
         return;
 
+    uint offset = mesh.vertex_offsets[level];
+    vertex_index += offset;
+
     // pin vertex 0 to fix gauge
-    if (vertex_index == 0)
+    if (all(thread == 0))
     {
         mesh.psi_rw[vertex_index] = 0;
         return;
@@ -99,11 +107,11 @@ void vorticity_to_streamfunction(uint3 thread: SV_DispatchThreadID)
     for (uint i = 0; i < mesh.num_adjacencies; i++)
     {
         uint neighbor_index = mesh.adjacencies[vertex_index * mesh.num_adjacencies + i];
-        if (neighbor_index >= mesh.num_vertices)
+        if (neighbor_index == 0xFFFFFFFF)
             break;
 
         float w = mesh.edge_weights[vertex_index * mesh.num_adjacencies + i];
-        sum  += w * mesh.psi[neighbor_index];
+        sum  += w * mesh.psi[offset + neighbor_index];
         diag += w;
     }
     float new_psi = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;

@@ -13,10 +13,12 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
     uint vertex_index = thread.y * 4096 + thread.x;
     if (vertex_index >= mesh.num_vertices)
         return;
+
+    uint offset = mesh.vertex_offsets[mesh.levels-1];
     
-    float3 pos = mesh.load_vertex(vertex_index);
-    float smoke = mesh.smoke_rw[vertex_index];
-    float psi = mesh.psi_rw[vertex_index];
+    float3 pos  = mesh.load_vertex(vertex_index);
+    float smoke = mesh.smoke_rw[vertex_index]; // smoke only stored for finest subdivision level
+    float psi   = mesh.psi_rw[offset + vertex_index];
 
     float3 n = normalize(pos);
 
@@ -38,5 +40,5 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
     }
 
     mesh.smoke_rw[vertex_index] = smoke;
-    mesh.psi_rw[vertex_index] = psi;
+    mesh.psi_rw[offset + vertex_index] = psi;
 }

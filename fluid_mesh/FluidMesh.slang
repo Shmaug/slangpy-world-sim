@@ -47,16 +47,16 @@ float3 triangle_centroid(float3x3 vertices)
 
 struct FluidMesh
 {
-    ByteAddressBuffer      node_vertex_indices;
-    StructuredBuffer<uint> node_children;
-
     ByteAddressBuffer vertices;
-    ByteAddressBuffer indices; // 32 bit
-    StructuredBuffer<uint>  adjacencies; // list of adjacent vertices for each vertex
-    StructuredBuffer<uint>  colored_vertices; // concatenated red and black vertices for gauss-seidel
-    StructuredBuffer<float> vertex_weights; // barycentric area weight
-    StructuredBuffer<float> edge_weights; // list of edge weights for each adjacency
-    
+    ByteAddressBuffer faces; // 32 bit
+    StructuredBuffer<uint> face_children;
+    StructuredBuffer<uint> face_offsets; // per-level offset into faces
+    StructuredBuffer<uint> vertex_offsets; // per-level offset into vertex data (adjacencies/psi/etc.)
+
+    StructuredBuffer<uint>    adjacencies; // list of adjacent vertices for each vertex
+    StructuredBuffer<float>   vertex_weights; // barycentric area weight
+    StructuredBuffer<float>   edge_weights; // list of edge weights for each adjacency
+
     StructuredBuffer<float>   psi; // per-vertex streamfunction
     RWStructuredBuffer<float> psi_rw;
     
@@ -67,9 +67,7 @@ struct FluidMesh
     RWStructuredBuffer<float> smoke_rw;
 
     static const uint num_adjacencies = 6; // icosphere max vertex degree
-
     uniform uint num_vertices;
-    uniform uint num_faces;
     uniform uint levels;
 
     float3 load_vertex(uint index)
@@ -78,18 +76,19 @@ struct FluidMesh
     }
 
     // load vertex indices for a triangle
-    uint3 load_indices(uint triangle_index)
+    uint3 load_indices(uint level, uint face_index)
     {
-        return indices.Load3(triangle_index * sizeof(uint3));
+        uint offset = face_offsets[level];
+        return faces.Load3((offset + face_index) * sizeof(uint3));
     }
 
     // stores vertices in columns
-    float3x3 load_face_vertices(uint3 indices)
+    float3x3 load_face_vertices(uint3 face)
     {
         float3x3 f;
         [ForceUnroll]
         for (uint i = 0; i < 3; i++)
-            f[i] = load_vertex(indices[i]);
+            f[i] = load_vertex(face[i]);
         return f;
     }
 
@@ -97,7 +96,7 @@ struct FluidMesh
     {
         // acceleration structure search
 
-        uint node_index = -1;
+        uint face_index = -1;
         face = -1;
         bary = 0;
 
@@ -106,69 +105,73 @@ struct FluidMesh
         // base icosphere has 20 triangles
         for (uint i = 0; i < 20; i++)
         {
-            face = node_vertex_indices.Load3(i * sizeof(uint3));
+            face = faces.Load3(i * sizeof(uint3));
             vertices = load_face_vertices(face);
             if (dot(triangle_centroid(vertices), pos) > 0)
             {
                 if (in_spherical_triangle(pos, vertices))
                 {
-                    node_index = i;
+                    face_index = i;
                     break;
                 }
             }
         }
-        if (node_index == -1)
+        if (face_index == -1)
             return false; // failed to select a root node
 
         for (uint l = 1; l < levels; l++)
         {
-            uint first_child = node_children[node_index];
+            uint first_child = face_children[face_index];
+
             [ForceUnroll]
             for (uint j = 0; j < 4; j++)
             {
-                face = node_vertex_indices.Load3((first_child + j) * sizeof(uint3));
+                face = faces.Load3((first_child + j) * sizeof(uint3));
                 vertices = load_face_vertices(face);
                 if (in_spherical_triangle(pos, vertices))
                 {
-                    node_index = first_child + j;
+                    face_index = first_child + j;
                     break;
                 }
             }
-            if (node_index < first_child || node_index >= first_child + 4)
+            if (face_index < first_child || face_index >= first_child + 4)
                 return false; // failed to select a child node
         }
 
         bary = triangle_barycentrics(pos, vertices);
         return true;
     }
-};
 
-float3 compute_velocity_at_vertex(FluidMesh mesh, uint vertex_index, float3 vertex)
-{
-    float psi = mesh.psi[vertex_index];
-    float3 normal = normalize(vertex);
-
-    float3 velocity = 0;
-    uint edge_n = 0;
-    for (uint i = 0; i < mesh.num_adjacencies; i++)
+    float3 compute_velocity_at_vertex(uint vertex_index, float3 vertex)
     {
-        uint neighbor_index = mesh.adjacencies[vertex_index * mesh.num_adjacencies + i];
-        if (neighbor_index >= mesh.num_vertices)
-            break;
+        uint offset = vertex_offsets[levels-1];
+        vertex_index += offset;
 
-        float3 vi = mesh.load_vertex(neighbor_index);
-        float psi_i = mesh.psi[neighbor_index];
+        float psi_v = psi[vertex_index];
+        float3 normal = normalize(vertex);
 
-        float3 dv = vi - vertex;
-        float len = length(dv);
-        
-        // dpsi/dn: psi gradient along the edge direction
-        float dpsi_ds = (psi_i - psi) / len;
-        
-        // Velocity is perpendicular to both surface normal and edge gradient
-        // u = n × (dpsi/ds * edge_dir) = (dpsi/ds) * (n × edge_dir)
-        velocity += dpsi_ds * cross(normal, dv / len);
-        edge_n++;
+        float3 velocity = 0;
+        uint edge_n = 0;
+        for (uint i = 0; i < num_adjacencies; i++)
+        {
+            uint neighbor_index = adjacencies[vertex_index * num_adjacencies + i];
+            if (neighbor_index == 0xFFFFFFFF)
+                break;
+
+            float3 vi = load_vertex(neighbor_index);
+            float psi_i = psi[offset + neighbor_index];
+
+            float3 dv = vi - vertex;
+            float len = length(dv);
+            
+            // dpsi/dn: psi gradient along the edge direction
+            float dpsi_ds = (psi_i - psi_v) / len;
+            
+            // Velocity is perpendicular to both surface normal and edge gradient
+            // u = n × (dpsi/ds * edge_dir) = (dpsi/ds) * (n × edge_dir)
+            velocity += dpsi_ds * cross(normal, dv / len);
+            edge_n++;
+        }
+        return edge_n > 0 ? velocity / edge_n : edge_n;
     }
-    return edge_n > 0 ? velocity / edge_n : edge_n;
-}
+};
