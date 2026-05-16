@@ -52,6 +52,8 @@ struct FluidMesh
     StructuredBuffer<uint> face_children;
     StructuredBuffer<uint> face_offsets; // per-level offset into faces
     StructuredBuffer<uint> vertex_offsets; // per-level offset into vertex data (adjacencies/psi/etc.)
+    StructuredBuffer<uint> vertex_counts; // per-level vertex count
+    StructuredBuffer<uint2> parent_edges; // parent edges for each vertex
 
     StructuredBuffer<uint>    adjacencies; // list of adjacent vertices for each vertex
     StructuredBuffer<float>   vertex_weights; // barycentric area weight
@@ -142,9 +144,9 @@ struct FluidMesh
         return true;
     }
 
-    float3 compute_velocity_at_vertex(uint vertex_index, float3 vertex)
+    float3 compute_velocity_at_vertex(uint level, uint vertex_index, float3 vertex)
     {
-        uint offset = vertex_offsets[levels-1];
+        uint offset = vertex_offsets[level];
         vertex_index += offset;
 
         float psi_v = psi[vertex_index];

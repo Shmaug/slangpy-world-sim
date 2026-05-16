@@ -85,6 +85,7 @@ class App:
         self.simulator.setup_ui(spy.ui.Group(window, label="Simulation"))
 
         self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Streamfunction", "Vorticity" ])
+        self.render_level = spy.ui.DragInt(window, "Level", 6, min=0, max=self.simulator.subdivision_levels - 1)
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -181,12 +182,15 @@ class App:
                 view = spy.math.inverse(camera_to_world)
                 projection = self.camera.projection(surface_texture.width / surface_texture.height)
 
+                level = min(max(self.render_level.value, 0), self.simulator.subdivision_levels-1)
+
                 cursor = spy.ShaderCursor(shader)
                 cursor["view_projection"] = spy.math.mul(projection, view)
                 cursor["render_mode"] = self.render_mode.value
                 cursor["mesh"] = self.simulator.mesh_vars
+                cursor["level"] = level
 
-                pass_encoder.draw(spy.DrawArguments({"vertex_count": self.simulator.num_faces * 3}))
+                pass_encoder.draw(spy.DrawArguments({"vertex_count": self.simulator.level_face_counts[level] * 3}))
             
             command_encoder.blit(surface_texture, self.render_texture)
 

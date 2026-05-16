@@ -7,7 +7,7 @@ def edge_key(i0,i1):
     return (np.uint64(min(i0,i1)) << 32) | np.uint64(max(i0,i1))
 
 def process_mesh(vertices:np.ndarray, indices:np.ndarray):
-    print("Computing laplacian edge weights")
+    # print("Computing laplacian edge weights")
 
     i0s = indices[:, 0]
     i1s = indices[:, 1]
@@ -36,7 +36,7 @@ def process_mesh(vertices:np.ndarray, indices:np.ndarray):
     for i, j, c in zip(i0s, i1s, c2s):
         edge_weights_dict[edge_key(i, j)] += c
 
-    print("Computing adjacencies")
+    # print("Computing adjacencies")
 
     num_vertices = vertices.shape[0]
 
@@ -61,7 +61,7 @@ def process_mesh(vertices:np.ndarray, indices:np.ndarray):
             adjacencies[v,i]  = n
             edge_weights[v,i] = edge_weights_dict[edge_key(v,n)]
 
-    print("Computing vertex area weights")
+    # print("Computing vertex area weights")
 
     area_weights = np.zeros(num_vertices, dtype=np.float32)
     tri_areas = np.linalg.norm(np.cross(v1s - v0s, v2s - v0s), axis=1) / 2.0
@@ -86,6 +86,8 @@ class MeshFluidSimulator:
         self.advect_kernel = create_kernel("fluid-advection.cs.slang", "advect")
         self.compute_vorticity_kernel = create_kernel("fluid-advection.cs.slang", "streamfunction_to_vorticity")
         self.compute_streamfunction_kernel = create_kernel("fluid-advection.cs.slang", "vorticity_to_streamfunction")
+        self.streamfunction_c2f_kernel = create_kernel("fluid-advection.cs.slang", "streamfunction_coarse_to_fine")
+        self.streamfunction_f2c_kernel = create_kernel("fluid-advection.cs.slang", "streamfunction_fine_to_coarse")
 
         self.subdivision_levels = 7
         self.create_mesh()
@@ -133,9 +135,13 @@ class MeshFluidSimulator:
         ] ]
         face_children = [ 0xFFFFFFFF ] * len(faces)
 
+        parent_edges = [ [0xFFFFFFFF, 0xFFFFFFFF] ] * len(vertices) # edges generating each vertex
+
         level_faces = [ [ [a,b,c] for a,b,c in faces ] ]
         level_face_offsets = [0]
         level_vertex_offsets = [0]
+        self.level_vertex_counts = [len(vertices)]
+        self.level_face_counts = [len(faces)]
 
         adjacencies, edge_weights, area_weights = process_mesh(np.array(vertices, np.float32), np.array(level_faces[-1], np.uint32))
 
@@ -157,6 +163,7 @@ class MeshFluidSimulator:
                         v = (vertices[j0] + vertices[j1])*0.5
                         v /= np.linalg.norm(v) # project to sphere
                         vertices.append(v)
+                        parent_edges.append([j0,j1])
 
                 # add new faces
 
@@ -181,10 +188,12 @@ class MeshFluidSimulator:
                     face_children.append(0xFFFFFFFF)
             
             level_faces.append(new_faces)
+            self.level_vertex_counts.append(len(vertices))
+            self.level_face_counts.append(len(new_faces))
 
             level_adjacencies, level_edge_weights, level_area_weights = process_mesh(np.array(vertices, np.float32), np.array(new_faces, np.uint32))
 
-            adjacencies = np.vstack((adjacencies, level_adjacencies))
+            adjacencies  = np.vstack((adjacencies,  level_adjacencies))
             edge_weights = np.vstack((edge_weights, level_edge_weights))
             area_weights = np.hstack((area_weights, level_area_weights))
 
@@ -193,7 +202,6 @@ class MeshFluidSimulator:
         face_children = np.array(face_children, np.uint32)
 
         self.num_vertices = vertices.shape[0]
-        self.num_faces = len(level_faces[-1])
 
         print("Done preprocessing")
 
@@ -203,6 +211,8 @@ class MeshFluidSimulator:
             "face_children":  self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=face_children),
             "face_offsets":   self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(level_face_offsets, np.uint32)),
             "vertex_offsets": self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(level_vertex_offsets, np.uint32)),
+            "vertex_counts":  self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(self.level_vertex_counts, np.uint32)),
+            "parent_edges":   self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=np.array(parent_edges, np.uint32)),
             "adjacencies":    self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=adjacencies),
             "vertex_weights": self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=area_weights),
             "edge_weights":   self.device.create_buffer(usage=spy.BufferUsage.shader_resource, data=edge_weights),
@@ -230,8 +240,10 @@ class MeshFluidSimulator:
         spy.ui.Button(window, "Step", callback=step_cb)
         self.reset_button = spy.ui.Button(window, "Reset", callback=reset_cb)
         self.subdivision_level_ui = spy.ui.DragInt(window, "Subdivision level", value=7, min=1, max=10, callback=level_cb)
-        self.jacobi_iterations = spy.ui.DragInt(window, "Solver iterations", value=10)
-        self.multiresolution = spy.ui.CheckBox(window, "Multiresolution solver")
+        self.solver_iterations = spy.ui.DragInt(window, "Solver iterations", value=100)
+        self.solver_multiresolution = spy.ui.CheckBox(window, "Multiresolution solver")
+        self.solver_multiresolution_substeps = spy.ui.DragInt(window, "Multiresolution substeps", value=5, min=0)
+        self.solver_multiresolution_min_level = spy.ui.DragInt(window, "Multiresolution min level", value=1, min=0)
         self.dt = spy.ui.DragFloat(window, "Timestep", 0.01)
         self.emit_plume = spy.ui.CheckBox(window, "Emit plume")
 
@@ -270,18 +282,58 @@ class MeshFluidSimulator:
         )
         swap("vorticity")
 
-        # compute streamfunction from advected vorticity
+        # solve for streamfunction from advected vorticity
         command_encoder.clear_buffer(self.mesh_vars["psi_rw"])
-        for _ in range(self.jacobi_iterations.value):
+
+        def solve(level):
             swap("psi")
             self.compute_streamfunction_kernel.dispatch(
-                [4096, (self.num_vertices + 4095) // 4096, 1],
+                [4096, (self.level_vertex_counts[level] + 4095) // 4096, 1],
                 vars={
                     "mesh": self.mesh_vars,
-                    "level": self.subdivision_levels-1
+                    "level": level
                 },
                 command_encoder=command_encoder
             )
+
+        for _ in range(self.solver_iterations.value):
+            if self.solver_multiresolution.value:
+                # multiresolution solver
+                # fine -> coarse
+                for coarse_level in reversed(range(max(0,self.solver_multiresolution_min_level.value), self.subdivision_levels-1)):
+                    # solve on fine vertices
+                    for _ in range(self.solver_multiresolution_substeps.value):
+                        solve(coarse_level+1)
+
+                    # average onto coarse vertices
+                    self.streamfunction_f2c_kernel.dispatch(
+                        [4096, (self.level_vertex_counts[coarse_level] + 4095) // 4096, 1],
+                        vars={
+                            "mesh": self.mesh_vars,
+                            "level": coarse_level
+                        },
+                        command_encoder=command_encoder
+                    )
+
+                # coarse -> fine
+                # for fine_level in range(self.solver_multiresolution_min_level.value+1, self.subdivision_levels):
+                #     # solve on coarse vertices
+                #     for _ in range(self.solver_multiresolution_substeps.value):
+                #         solve(fine_level)
+
+                #     # interpolate to fine vertices
+                #     swap("psi")
+                #     self.streamfunction_c2f_kernel.dispatch(
+                #         [4096, (self.level_vertex_counts[fine_level] + 4095) // 4096, 1],
+                #         vars={
+                #             "mesh": self.mesh_vars,
+                #             "level": fine_level
+                #         },
+                #         command_encoder=command_encoder
+                #     )
+            else:
+                # standard solver
+                solve(self.subdivision_levels-1)
 
         if self.emit_plume.value:
             self.emit_kernel.dispatch(

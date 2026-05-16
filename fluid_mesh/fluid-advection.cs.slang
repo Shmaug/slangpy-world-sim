@@ -59,7 +59,7 @@ void advect(uint3 thread: SV_DispatchThreadID)
     uint offset = mesh.vertex_offsets[mesh.levels-1];
 
     float3 vertex = mesh.load_vertex(vertex_index);
-    float3 velocity = mesh.compute_velocity_at_vertex(vertex_index, vertex);
+    float3 velocity = mesh.compute_velocity_at_vertex(mesh.levels-1, vertex_index, vertex);
 
     // advect backwards + project to sphere
     float3 pos = normalize(vertex - velocity * dt);
@@ -89,7 +89,7 @@ void advect(uint3 thread: SV_DispatchThreadID)
 void vorticity_to_streamfunction(uint3 thread: SV_DispatchThreadID)
 {
     uint vertex_index = thread.y * 4096 + thread.x;
-    if (vertex_index >= mesh.num_vertices)
+    if (vertex_index >= mesh.vertex_counts[level])
         return;
 
     uint offset = mesh.vertex_offsets[level];
@@ -116,4 +116,57 @@ void vorticity_to_streamfunction(uint3 thread: SV_DispatchThreadID)
     }
     float new_psi = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;
     mesh.psi_rw[vertex_index] = new_psi;
+}
+
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void streamfunction_fine_to_coarse(uint3 thread: SV_DispatchThreadID)
+{
+    uint coarse_vertex_index = thread.y * 4096 + thread.x;
+    if (coarse_vertex_index >= mesh.vertex_counts[level])
+        return;
+
+    uint coarse_offset = mesh.vertex_offsets[level];
+    uint fine_offset = mesh.vertex_offsets[level+1];
+    
+    // sum psi over neighbors in fine mesh
+    float neighbor_psi = 0;
+    uint count = 0;
+    for (uint i = 0; i < mesh.num_adjacencies; i++)
+    {
+        uint neighbor_index = mesh.adjacencies[(fine_offset + coarse_vertex_index) * mesh.num_adjacencies + i];
+        if (neighbor_index == 0xFFFFFFFF)
+            break;
+
+        neighbor_psi += mesh.psi_rw[fine_offset + neighbor_index];
+        count++;
+    }
+    // average between neighors and current value
+    mesh.psi_rw[coarse_offset + coarse_vertex_index] = (mesh.psi_rw[fine_offset + coarse_vertex_index] + neighbor_psi);
+}
+
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void streamfunction_coarse_to_fine(uint3 thread: SV_DispatchThreadID)
+{
+    uint vertex_index = thread.y * 4096 + thread.x;
+    if (vertex_index >= mesh.vertex_counts[level])
+        return;
+
+    uint coarse_offset = mesh.vertex_offsets[level-1];
+    uint fine_offset = mesh.vertex_offsets[level];
+
+    uint coarse_count = mesh.vertex_counts[level-1];
+    
+    if (vertex_index < coarse_count)
+    {
+        // This vertex existed at the coarse level - transfer its value
+        mesh.psi_rw[fine_offset + vertex_index] = mesh.psi[coarse_offset + vertex_index];
+    }
+    else
+    {
+        // each fine vertex lies on the midpoint of a coarse edge
+        uint2 coarse_edge = mesh.parent_edges[vertex_index];
+        mesh.psi_rw[fine_offset + vertex_index] = (mesh.psi[coarse_offset + coarse_edge.x] + mesh.psi[coarse_offset + coarse_edge.y]) * 0.5;
+    }
 }

@@ -5,6 +5,7 @@ uniform FluidMesh mesh;
 
 uniform float4x4 view_projection;
 uniform uint     render_mode;
+uniform uint     level;
 
 enum RenderMode
 {
@@ -25,10 +26,10 @@ struct v2f
 [shader("vertex")]
 v2f vs(uint vertexId: SV_VertexID)
 {
-    uint vertex_index = mesh.load_indices(mesh.levels-1, vertexId / 3)[vertexId % 3];
+    uint vertex_index = mesh.load_indices(level, vertexId / 3)[vertexId % 3];
     float3 vertex = mesh.load_vertex(vertex_index);
 
-    uint offset = mesh.vertex_offsets[mesh.levels-1];
+    uint offset = mesh.vertex_offsets[level];
 
     v2f o;
     o.pos = mul(view_projection, float4(vertex, 1));
@@ -40,7 +41,7 @@ v2f vs(uint vertexId: SV_VertexID)
             o.value = mesh.smoke[vertex_index];
             break;
         case RenderMode::Velocity:
-            o.value = mesh.compute_velocity_at_vertex(vertex_index, vertex);
+            o.value = mesh.compute_velocity_at_vertex(level, vertex_index, vertex);
             break;
         case RenderMode::Streamfunction:
             o.value = mesh.psi[offset + vertex_index];
@@ -66,6 +67,8 @@ float4 fs(v2f i, float3 i_bary : SV_BaryCentrics) : SV_Target
     {
         c.rgb = saturate(float3(1 - exp(i.value.x), 1 - exp(-i.value.x), 0.1));
     }
+
+    // c.rgb = (((i.prim_id + uint3(456, 798, 123)) * uint3(123, 456, 789)) % 255) / 255.0;
 
     /*
     uint3 face;
