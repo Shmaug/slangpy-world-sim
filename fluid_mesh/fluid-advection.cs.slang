@@ -142,7 +142,7 @@ void streamfunction_fine_to_coarse(uint3 thread: SV_DispatchThreadID)
         count++;
     }
     // average between neighors and current value
-    mesh.psi_rw[coarse_offset + coarse_vertex_index] = (mesh.psi_rw[fine_offset + coarse_vertex_index] + neighbor_psi);
+    mesh.psi_rw[coarse_offset + coarse_vertex_index] = (mesh.psi_rw[fine_offset + coarse_vertex_index] + neighbor_psi) / (count + 1);
 }
 
 [shader("compute")]
@@ -161,12 +161,12 @@ void streamfunction_coarse_to_fine(uint3 thread: SV_DispatchThreadID)
     if (vertex_index < coarse_count)
     {
         // This vertex existed at the coarse level - transfer its value
-        mesh.psi_rw[fine_offset + vertex_index] = mesh.psi[coarse_offset + vertex_index];
+        mesh.psi_rw[fine_offset + vertex_index] = mesh.psi_rw[coarse_offset + vertex_index];
     }
     else
     {
         // each fine vertex lies on the midpoint of a coarse edge
         uint2 coarse_edge = mesh.parent_edges[vertex_index];
-        mesh.psi_rw[fine_offset + vertex_index] = (mesh.psi[coarse_offset + coarse_edge.x] + mesh.psi[coarse_offset + coarse_edge.y]) * 0.5;
+        mesh.psi_rw[fine_offset + vertex_index] = (mesh.psi_rw[coarse_offset + coarse_edge.x] + mesh.psi_rw[coarse_offset + coarse_edge.y]) * 0.5;
     }
 }

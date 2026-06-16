@@ -243,7 +243,7 @@ class MeshFluidSimulator:
         self.solver_iterations = spy.ui.DragInt(window, "Solver iterations", value=100)
         self.solver_multiresolution = spy.ui.CheckBox(window, "Multiresolution solver")
         self.solver_multiresolution_substeps = spy.ui.DragInt(window, "Multiresolution substeps", value=5, min=0)
-        self.solver_multiresolution_min_level = spy.ui.DragInt(window, "Multiresolution min level", value=1, min=0)
+        self.solver_multiresolution_min_level = spy.ui.DragInt(window, "Multiresolution min level", value=2, min=0)
         self.dt = spy.ui.DragFloat(window, "Timestep", 0.01)
         self.emit_plume = spy.ui.CheckBox(window, "Emit plume")
 
@@ -299,11 +299,15 @@ class MeshFluidSimulator:
         for _ in range(self.solver_iterations.value):
             if self.solver_multiresolution.value:
                 # multiresolution solver
+                for _ in range(self.solver_multiresolution_substeps.value):
+                    solve(self.subdivision_levels-1)
+
+                min_level = min(max(self.solver_multiresolution_min_level.value, 0), self.subdivision_levels-2)
+
                 # fine -> coarse
-                for coarse_level in reversed(range(max(0,self.solver_multiresolution_min_level.value), self.subdivision_levels-1)):
+                for coarse_level in reversed(range(min_level, self.subdivision_levels-1)):
                     # solve on fine vertices
-                    for _ in range(self.solver_multiresolution_substeps.value):
-                        solve(coarse_level+1)
+                    solve(coarse_level+1)
 
                     # average onto coarse vertices
                     self.streamfunction_f2c_kernel.dispatch(
@@ -315,22 +319,28 @@ class MeshFluidSimulator:
                         command_encoder=command_encoder
                     )
 
-                # coarse -> fine
-                # for fine_level in range(self.solver_multiresolution_min_level.value+1, self.subdivision_levels):
-                #     # solve on coarse vertices
-                #     for _ in range(self.solver_multiresolution_substeps.value):
-                #         solve(fine_level)
+                # solve on coarsest vertices
+                for _ in range(self.solver_multiresolution_substeps.value):
+                    solve(min_level)
 
-                #     # interpolate to fine vertices
-                #     swap("psi")
-                #     self.streamfunction_c2f_kernel.dispatch(
-                #         [4096, (self.level_vertex_counts[fine_level] + 4095) // 4096, 1],
-                #         vars={
-                #             "mesh": self.mesh_vars,
-                #             "level": fine_level
-                #         },
-                #         command_encoder=command_encoder
-                #     )
+                # coarse -> fine
+                for fine_level in range(min_level+1, self.subdivision_levels):
+                    # solve on coarse vertices
+                    solve(fine_level)
+
+                    # interpolate to fine vertices
+                    self.streamfunction_c2f_kernel.dispatch(
+                        [4096, (self.level_vertex_counts[fine_level] + 4095) // 4096, 1],
+                        vars={
+                            "mesh": self.mesh_vars,
+                            "level": fine_level
+                        },
+                        command_encoder=command_encoder
+                    )
+
+                # one more pass on the fine vertices
+                for _ in range(self.solver_multiresolution_substeps.value):
+                    solve(self.subdivision_levels-1)
             else:
                 # standard solver
                 solve(self.subdivision_levels-1)

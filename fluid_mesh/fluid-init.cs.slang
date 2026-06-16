@@ -33,7 +33,7 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
         
         // Create tangent basis at emission point
         float3 t1 = normalize(cross(target_pos, target_dir));
-        float psi_target = dot(pos - target_pos, t1) * gaussian;
+        float psi_target = 10*dot(pos - target_pos, t1) * gaussian;
         
         psi   += psi_target;
         smoke += gaussian;
