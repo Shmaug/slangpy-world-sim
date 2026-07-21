@@ -2,7 +2,7 @@ import slangpy as spy
 import os
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-from MeshFluidSimulator import MeshFluidSimulator
+from CubeFluidSimulator import CubeFluidSimulator
 from world.Camera import Camera, InputState
 
 COLOR_FORMAT = spy.Format.rgba32_float
@@ -44,43 +44,22 @@ class App:
         self.render_texture = None
         self.fps_avg = 0
 
-        self.render_pipeline = self.device.create_render_pipeline(
-            program=self.device.load_program(get_asset_path("render-fluid.3d.slang"), entry_point_names=["vs", "fs"]),
-            input_layout=None,
-            targets=[spy.ColorTargetDesc({
-                "format": COLOR_FORMAT, 
-                "color": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.one, "dst_factor": spy.BlendFactor.zero, "op": spy.BlendOp.add}),
-                "alpha": spy.AspectBlendDesc({"src_factor": spy.BlendFactor.one, "dst_factor": spy.BlendFactor.zero, "op": spy.BlendOp.add}),
-                "write_mask": spy.RenderTargetWriteMask.all, 
-                "enable_blend": False
-            })],
-            depth_stencil=spy.DepthStencilDesc({
-                "format": DEPTH_FORMAT, 
-                "depth_test_enable": True, 
-                "depth_write_enable": True, 
-                "depth_func": spy.ComparisonFunc.less, 
-                "stencil_enable": False
-            }),
-            rasterizer=spy.RasterizerDesc({
-                "fill_mode": spy.FillMode.solid,
-                "cull_mode": spy.CullMode.back,
-                "front_face": spy.FrontFaceMode.counter_clockwise,
-            })
-        )
+        def create_kernel(shader_file, entry):
+            path = os.path.join(os.path.dirname(__file__), shader_file)
+            program = self.device.load_program(path, [entry])
+            return self.device.create_compute_kernel(program)
         
-        self.render_offset = spy.float2(0,0)
-        self.render_scale  = 1
+        self.render_kernel = create_kernel("render-fluid.cs.slang", "render")
 
         screen = self.ui.screen
         window = spy.ui.Window(screen, "Settings", size=spy.float2(500, 300))
 
         self.fps_text = spy.ui.Text(window, "FPS: 0")
         
-        self.simulator = MeshFluidSimulator(self.device, spy.ui.Group(window, label="Simulation"))
+        self.simulator = CubeFluidSimulator(self.device, spy.ui.Group(window, label="Simulation"))
         self.camera = Camera()
 
-        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Mesh" ])
-        self.render_level = spy.ui.DragInt(window, "Level", 6, min=0, max=self.simulator.subdivision_levels - 1)
+        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Tangent", "Bitangent", "Texels" ])
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -128,7 +107,7 @@ class App:
             command_encoder = self.device.create_command_encoder()
 
             self.simulator.step(command_encoder, dt)
-        
+
             if self.render_texture is None or self.render_texture.width != surface_texture.width or self.render_texture.height != surface_texture.height:
                 self.render_texture = self.device.create_texture(
                     format=COLOR_FORMAT,
@@ -153,48 +132,30 @@ class App:
                     "label": "depth_texture_view"
                 })
 
-            with command_encoder.begin_render_pass(spy.RenderPassDesc({
-                "color_attachments": [ spy.RenderPassColorAttachment({
-                    "view": self.render_texture_view,
-                    "load_op": spy.LoadOp.clear,
-                    "store_op": spy.StoreOp.store,
-                    "clear_value": spy.float4(0,0,0,0)
-                }) ],
-                "depth_stencil_attachment": spy.RenderPassDepthStencilAttachment({
-                    "view": self.depth_texture_view,
-                    "depth_load_op": spy.LoadOp.clear,
-                    "depth_store_op": spy.StoreOp.store,
-                    "depth_clear_value": 1
-                })
-            })) as pass_encoder:
-                shader = pass_encoder.bind_pipeline(self.render_pipeline)
-                pass_encoder.set_render_state({
-                    "viewports": [spy.Viewport.from_size(surface_texture.width, surface_texture.height)],
-                    "scissor_rects": [ spy.ScissorRect.from_size(surface_texture.width, surface_texture.height) ],
-                })
+            camera_to_world = self.camera.camera_to_world()
+            view = spy.math.inverse(camera_to_world)
+            projection = self.camera.projection(surface_texture.width / surface_texture.height)
+            view_projection = spy.math.mul(projection, view)
 
-                camera_to_world = self.camera.camera_to_world()
-                view = spy.math.inverse(camera_to_world)
-                projection = self.camera.projection(surface_texture.width / surface_texture.height)
-                view_projection = spy.math.mul(projection, view);
+            mouse_pos = self.input_state.get("mouse")
+            if mouse_pos is None:
+                mouse_pos = spy.float2(0,0)
 
-                level = min(max(self.render_level.value, 0), self.simulator.subdivision_levels-1)
-
-                mouse_pos = self.input_state.get("mouse")
-                if mouse_pos is None:
-                    mouse_pos = spy.float2(0,0)
-                mouse_uv = mouse_pos / spy.float2(surface_texture.width, surface_texture.height)
-
-                cursor = spy.ShaderCursor(shader)
-                cursor["view_projection"] = view_projection
-                cursor["render_mode"] = self.render_mode.value
-                cursor["mesh"] = self.simulator.mesh_vars
-                cursor["level"] = level
-                cursor["mouse_ray_org"] = self.camera.position
-                cursor["mouse_ray_dir"] = spy.math.mul(spy.math.inverse(view_projection), spy.float4(2*mouse_uv.x-1, -(2*mouse_uv.y-1), 1, 1)).xyz - self.camera.position
-
-                pass_encoder.draw(spy.DrawArguments({"vertex_count": self.simulator.level_face_counts[level] * 3}))
-            
+            self.render_kernel.dispatch(
+                [ surface_texture.width, surface_texture.height, 1 ],
+                {
+                    "fluid": self.simulator.fluid_vars,
+                    "view_projection": view_projection,
+                    "inv_view_projection": spy.math.inverse(view_projection),
+                    "camera_pos": self.camera.position,
+                    "render_mode": self.render_mode.value,
+                    "resolution": spy.uint2(surface_texture.width, surface_texture.height),
+                    "mouse_pos": mouse_pos,
+                    "image": self.render_texture
+                },
+                command_encoder
+            )
+        
             command_encoder.blit(surface_texture, self.render_texture)
 
             self.ui.end_frame(surface_texture, command_encoder)

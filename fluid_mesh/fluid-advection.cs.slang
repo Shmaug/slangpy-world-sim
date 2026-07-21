@@ -5,168 +5,89 @@ uniform FluidMesh mesh;
 uniform float dt;
 uniform uint level;
 
-float interpolate<let N : int>(StructuredBuffer<float> data, vector<uint,N> face, vector<float,N> bary)
-{
-    vector<float, N> v_data;
-
-    [ForceUnroll]
-    for (uint i = 0; i < N; i++)
-        v_data[i] = data[face[i]];
-
-    float v = 0;
-    [ForceUnroll]
-    for (uint i = 0; i < N; i++)
-        v += bary[i] * v_data[i];
-
-    return v;
-}
-
-// compute (L @ psi) / A
-[shader("compute")]
-[numthreads(32, 1, 1)]
-void streamfunction_to_vorticity(uint3 thread: SV_DispatchThreadID)
-{
-    uint vertex_index = thread.y * 4096 + thread.x;
-    if (vertex_index >= mesh.num_vertices)
-        return;
-
-    uint offset = mesh.vertex_offsets[mesh.levels-1];
-    vertex_index += offset;
-
-    float lap  = 0;
-    float diag = 0;
-    for (uint i = 0; i < mesh.num_adjacencies; i++)
-    {
-        uint neighbor_index = mesh.adjacencies[vertex_index * mesh.num_adjacencies + i];
-        if (neighbor_index == 0xFFFFFFFF)
-            break;
-
-        float w = mesh.edge_weights[vertex_index * mesh.num_adjacencies + i];
-        lap  += w * mesh.psi[offset + neighbor_index];
-        diag += w;
-    }
-    mesh.vorticity_rw[vertex_index] = (diag * mesh.psi[vertex_index] - lap) / mesh.vertex_weights[vertex_index];
-}
-
 [shader("compute")]
 [numthreads(32, 1, 1)]
 void advect(uint3 thread: SV_DispatchThreadID)
 {
-    uint vertex_index = thread.y * 4096 + thread.x;
-    if (vertex_index >= mesh.num_vertices)
+    uint face_index = thread.y * 4096 + thread.x;
+    if (face_index >= mesh.level_face_counts[level])
         return;
+    face_index += mesh.level_face_offsets[level];
 
-    uint offset = mesh.vertex_offsets[mesh.levels-1];
+    uint3 face = mesh.load_face(face_index);
+    float3x3 vertices = mesh.load_face_vertices(face);
+    uint3 edges = mesh.load_face_edges(face_index);
 
-    float3 vertex = mesh.load_vertex(vertex_index);
-    float3 velocity = mesh.compute_velocity_at_vertex(mesh.levels-1, vertex_index, vertex);
-
-    // advect backwards + project to sphere
-    float3 pos = normalize(vertex - velocity * dt);
-
-    float vorticity = 0;
-    float smoke = 0;
-
-    uint3 face;
-    float3 bary;
-    if (mesh.find_face(pos, face, bary))
+    // advect smoke
     {
-        vorticity = interpolate(mesh.vorticity, offset + face, bary);
-        smoke     = interpolate(mesh.smoke, face, bary);
+        float3 velocity = mesh.sample_velocity(1 / 3.0, face, vertices, edges);
+        
+        // advect backwards + project to sphere
+        float3 sampled_pos = normalize(triangle_centroid(vertices) - velocity * dt);
+
+        float sampled_smoke;
+
+        uint sampled_face_index;
+        uint3 sampled_face;
+        float3x3 sampled_face_vertices;
+        if (mesh.find_face(sampled_pos, sampled_face_index, sampled_face, sampled_face_vertices))
+        {
+            sampled_smoke = mesh.sample_smoke(sampled_pos, sampled_face_index, sampled_face_vertices);
+        }
+        else
+        {
+            sampled_smoke = mesh.smoke[face_index];
+        }
+
+        mesh.smoke_rw[face_index] = sampled_smoke;
     }
-    else
+
+    // advect edge velocities
+    uint3 adjacent_faces = mesh.load_adjacent_faces(face_index);
+    [ForceUnroll]
+    for (uint i = 0; i < 3; i++)
     {
-        vorticity = mesh.vorticity[offset + vertex_index];
-        smoke     = mesh.smoke[vertex_index];
+        uint edge_index = edges[i];
+        uint adjacent_face = adjacent_faces[i];
+
+        float3 pos = normalize(0.5 * (vertices[(i+1)%3] + vertices[(i+2)%3]));
+
+        // compute barycentric coordinate for edge midpoint
+        float3 midpoint_bary = 0.5;
+        midpoint_bary[i] = 0; // edge i is opposite vertex i
+        float3 velocity = mesh.sample_velocity(midpoint_bary, face, vertices, edges);
+
+        // advect backwards + project to sphere
+        float3 sampled_pos = normalize(pos - velocity * dt);
+
+        float3 sampled_velocity;
+        uint sampled_face_index;
+        uint3 sampled_face;
+        float3x3 sampled_face_vertices;
+        if (mesh.find_face(sampled_pos, sampled_face_index, sampled_face, sampled_face_vertices))
+        {
+            float3 bary = triangle_barycentrics(sampled_pos, sampled_face_vertices);
+            sampled_velocity = mesh.sample_velocity(bary, sampled_face, sampled_face_vertices, mesh.load_face_edges(sampled_face_index));
+        }
+        else
+        {
+            sampled_velocity = velocity;
+        }
+
+        mesh.write_velocity<false>(sampled_velocity, edge_index, i, face_index, adjacent_face, face, vertices);
     }
-    
-    mesh.vorticity_rw[offset + vertex_index] = vorticity;
-    mesh.smoke_rw[vertex_index] = smoke;
 }
 
 [shader("compute")]
 [numthreads(32, 1, 1)]
-void vorticity_to_streamfunction(uint3 thread: SV_DispatchThreadID)
+void swap_velocity(uint3 thread: SV_DispatchThreadID)
 {
-    uint vertex_index = thread.y * 4096 + thread.x;
-    if (vertex_index >= mesh.vertex_counts[level])
+    uint edge_index = thread.y * 4096 + thread.x;
+    if (edge_index >= mesh.edge_count)
         return;
 
-    uint offset = mesh.vertex_offsets[level];
-    vertex_index += offset;
+    float v0 = mesh.velocity_rw[2 * edge_index + 0];
+    float v1 = mesh.velocity_rw[2 * edge_index + 1];
 
-    // pin vertex 0 to fix gauge
-    if (all(thread == 0))
-    {
-        mesh.psi_rw[vertex_index] = 0;
-        return;
-    }
-
-    float sum = 0;
-    float diag = 0;
-    for (uint i = 0; i < mesh.num_adjacencies; i++)
-    {
-        uint neighbor_index = mesh.adjacencies[vertex_index * mesh.num_adjacencies + i];
-        if (neighbor_index == 0xFFFFFFFF)
-            break;
-
-        float w = mesh.edge_weights[vertex_index * mesh.num_adjacencies + i];
-        sum  += w * mesh.psi[offset + neighbor_index];
-        diag += w;
-    }
-    float new_psi = (mesh.vertex_weights[vertex_index] * mesh.vorticity[vertex_index] + sum) / diag;
-    mesh.psi_rw[vertex_index] = new_psi;
-}
-
-[shader("compute")]
-[numthreads(32, 1, 1)]
-void streamfunction_fine_to_coarse(uint3 thread: SV_DispatchThreadID)
-{
-    uint coarse_vertex_index = thread.y * 4096 + thread.x;
-    if (coarse_vertex_index >= mesh.vertex_counts[level])
-        return;
-
-    uint coarse_offset = mesh.vertex_offsets[level];
-    uint fine_offset = mesh.vertex_offsets[level+1];
-    
-    // sum psi over neighbors in fine mesh
-    float neighbor_psi = 0;
-    uint count = 0;
-    for (uint i = 0; i < mesh.num_adjacencies; i++)
-    {
-        uint neighbor_index = mesh.adjacencies[(fine_offset + coarse_vertex_index) * mesh.num_adjacencies + i];
-        if (neighbor_index == 0xFFFFFFFF)
-            break;
-
-        neighbor_psi += mesh.psi_rw[fine_offset + neighbor_index];
-        count++;
-    }
-    // average between neighors and current value
-    mesh.psi_rw[coarse_offset + coarse_vertex_index] = (mesh.psi_rw[fine_offset + coarse_vertex_index] + neighbor_psi) / (count + 1);
-}
-
-[shader("compute")]
-[numthreads(32, 1, 1)]
-void streamfunction_coarse_to_fine(uint3 thread: SV_DispatchThreadID)
-{
-    uint vertex_index = thread.y * 4096 + thread.x;
-    if (vertex_index >= mesh.vertex_counts[level])
-        return;
-
-    uint coarse_offset = mesh.vertex_offsets[level-1];
-    uint fine_offset = mesh.vertex_offsets[level];
-
-    uint coarse_count = mesh.vertex_counts[level-1];
-    
-    if (vertex_index < coarse_count)
-    {
-        // This vertex existed at the coarse level - transfer its value
-        mesh.psi_rw[fine_offset + vertex_index] = mesh.psi_rw[coarse_offset + vertex_index];
-    }
-    else
-    {
-        // each fine vertex lies on the midpoint of a coarse edge
-        uint2 coarse_edge = mesh.parent_edges[vertex_index];
-        mesh.psi_rw[fine_offset + vertex_index] = (mesh.psi_rw[coarse_offset + coarse_edge.x] + mesh.psi_rw[coarse_offset + coarse_edge.y]) * 0.5;
-    }
+    mesh.velocity[edge_index] = 0.5 * (v0 + v1);
 }

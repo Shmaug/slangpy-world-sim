@@ -45,31 +45,27 @@ float3 triangle_centroid(float3x3 vertices)
     return v / 3.0;
 }
 
+// multiresolution icosphere fluid
 struct FluidMesh
 {
     ByteAddressBuffer vertices;
-    ByteAddressBuffer faces; // 32 bit
-    StructuredBuffer<uint> face_children;
-    StructuredBuffer<uint> face_offsets; // per-level offset into faces
-    StructuredBuffer<uint> vertex_offsets; // per-level offset into vertex data (adjacencies/psi/etc.)
-    StructuredBuffer<uint> vertex_counts; // per-level vertex count
-    StructuredBuffer<uint2> parent_edges; // parent edges for each vertex
+    ByteAddressBuffer faces;       // list of vertices for each face
+    StructuredBuffer<uint2> edges; // pair of vertices for each edge
 
-    StructuredBuffer<uint>    adjacencies; // list of adjacent vertices for each vertex
-    StructuredBuffer<float>   vertex_weights; // barycentric area weight
-    StructuredBuffer<float>   edge_weights; // list of edge weights for each adjacency
+    StructuredBuffer<uint> face_children; // index of first child face for each face
+    ByteAddressBuffer face_edges;         // list of edges for each face where face.edges[0] is opposite of face.vertices[0]
+    ByteAddressBuffer face_adjacencies;  // list of adjacent faces for each face
 
-    StructuredBuffer<float>   psi; // per-vertex streamfunction
-    RWStructuredBuffer<float> psi_rw;
-    
-    StructuredBuffer<float>   vorticity; // per-vertex vorticity
-    RWStructuredBuffer<float> vorticity_rw;
+    StructuredBuffer<uint> level_face_offsets; // offset in faces for each subdivision level
+    StructuredBuffer<uint> level_face_counts; // number of faces in each subdivision level
 
-    StructuredBuffer<float>   smoke; // per-vertex
-    RWStructuredBuffer<float> smoke_rw;
+    RWStructuredBuffer<float> velocity; // per-edge tangent velocity
+    RWStructuredBuffer<float> velocity_rw; // per-edge tangent velocity
 
-    static const uint num_adjacencies = 6; // icosphere max vertex degree
-    uniform uint num_vertices;
+    StructuredBuffer<float>   smoke; // per-face smoke quantity
+    RWStructuredBuffer<float> smoke_rw; // per-face smoke quantity
+
+    uniform uint edge_count;
     uniform uint levels;
 
     float3 load_vertex(uint index)
@@ -77,11 +73,22 @@ struct FluidMesh
         return vertices.Load<float3>(index * sizeof(float3));
     }
 
-    // load vertex indices for a triangle
-    uint3 load_indices(uint level, uint face_index)
+    // load vertex indices for a face
+    uint3 load_face(uint face_index)
     {
-        uint offset = face_offsets[level];
-        return faces.Load3((offset + face_index) * sizeof(uint3));
+        return faces.Load3(face_index * sizeof(uint3));
+    }
+
+    // load edge indices for a face
+    uint3 load_face_edges(uint face_index)
+    {
+        return face_edges.Load3(face_index * sizeof(uint3));
+    }
+
+    // load adjacent face indices for a face
+    uint3 load_adjacent_faces(uint face_index)
+    {
+        return face_adjacencies.Load3(face_index * sizeof(uint3));
     }
 
     // stores vertices in columns
@@ -94,15 +101,12 @@ struct FluidMesh
         return f;
     }
 
-    bool find_face(float3 pos, out uint3 face, out float3 bary)
+    bool find_face(float3 pos, out uint face_index, out uint3 face, out float3x3 vertices, uint max_level = 0xFFFFFFFF)
     {
         // acceleration structure search
 
-        uint face_index = -1;
+        face_index = -1;
         face = -1;
-        bary = 0;
-
-        float3x3 vertices;
 
         // base icosphere has 20 triangles
         for (uint i = 0; i < 20; i++)
@@ -140,40 +144,79 @@ struct FluidMesh
                 return false; // failed to select a child node
         }
 
-        bary = triangle_barycentrics(pos, vertices);
         return true;
     }
 
-    float3 compute_velocity_at_vertex(uint level, uint vertex_index, float3 vertex)
+    // Reconstructs the 3D velocity vector anywhere within a triangle
+    float3 sample_velocity(float3 bary, uint3 tri, float3x3 tri_vertices, uint3 tri_edges)
     {
-        uint offset = vertex_offsets[level];
-        vertex_index += offset;
+        float3 normal = 0.5 * cross(tri_vertices[1] - tri_vertices[0], tri_vertices[2] - tri_vertices[0]);
+        float area = length(normal);
+        normal /= area;
 
-        float psi_v = psi[vertex_index];
-        float3 normal = normalize(vertex);
+        float inv_2a = 1 / (2 * area);
 
-        float3 velocity = 0;
-        uint edge_n = 0;
-        for (uint i = 0; i < num_adjacencies; i++)
+        float3x3 grads;
+        grads[0] = cross(normal, tri_vertices[2] - tri_vertices[1]) * inv_2a;
+        grads[1] = cross(normal, tri_vertices[0] - tri_vertices[2]) * inv_2a;
+        grads[2] = cross(normal, tri_vertices[1] - tri_vertices[0]) * inv_2a;
+
+        float3 v = 0;
+
+        [ForceUnroll]
+        for (uint k = 0; k < 3; ++k)
         {
-            uint neighbor_index = adjacencies[vertex_index * num_adjacencies + i];
-            if (neighbor_index == 0xFFFFFFFF)
-                break;
+            uint a = (k + 1) % 3; // local edge k connects local verts a -> b
+            uint b = (k + 2) % 3;
 
-            float3 vi = load_vertex(neighbor_index);
-            float psi_i = psi[offset + neighbor_index];
+            uint edge_index = tri_edges[k];
+            float c = velocity[edge_index];
 
-            float3 dv = vi - vertex;
-            float len = length(dv);
-            
-            // dpsi/dn: psi gradient along the edge direction
-            float dpsi_ds = (psi_i - psi_v) / len;
-            
-            // Velocity is perpendicular to both surface normal and edge gradient
-            // u = n × (dpsi/ds * edge_dir) = (dpsi/ds) * (n × edge_dir)
-            velocity += dpsi_ds * cross(normal, dv / len);
-            edge_n++;
+            // Match this edge's globally-stored orientation (ev0 -> ev1) against
+            // the triangle-local orientation (a -> b) to get the correct sign.
+            uint2 edge = edges[edge_index];
+
+            float sign = 1.0;
+            if (tri[a] == edge[1] && tri[b] == edge[0])
+                sign = -1.0;
+            // else (tri[a] == edge[0] && tri[b] == edge[1]) -> sign stays +1
+
+            // Whitney edge basis function: W_ab = lambda_a * grad_b - lambda_b * grad_a
+            float3 W = bary[a] * grads[b] - bary[b] * grads[a];
+
+            v += sign * c * W;
         }
-        return edge_n > 0 ? velocity / edge_n : edge_n;
+
+        return v;
+    }
+
+    float sample_smoke(float3 pos, uint face_index, float3x3 face_vertices)
+    {
+        float3 normal = normalize(cross(face_vertices[1] - face_vertices[0], face_vertices[2] - face_vertices[0]));
+        float3 tangent = normalize(face_vertices[1] - face_vertices[0]);
+        float3 bitangent = cross(normal, tangent);
+        float3 centroid = triangle_centroid(face_vertices);
+
+        // project pos to triangle
+        pos -= normal * dot(pos - centroid, normal);
+
+        // TODO: compute per-vertex smoke values and use barycentric interpolation
+    }
+
+    void write_velocity<bool accumulate>(float3 velocity, uint edge_index, uint local_edge_index, uint face_index, uint adjacent_face, uint3 face, float3x3 vertices)
+    {
+        float3 face_normal = normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
+        velocity -= dot(velocity, face_normal) * face_normal;
+        
+        float3 edge_vec = vertices[(local_edge_index + 2) % 3] - vertices[(local_edge_index + 1) % 3];
+        if (face[(local_edge_index + 2) % 3] == edges[edge_index][0])
+            edge_vec = -edge_vec;
+
+        // store velocities for both face and sum them later
+        uint k = face_index > adjacent_face;
+        if (accumulate)
+            velocity_rw[2 * edge_index + k] += dot(edge_vec, velocity);
+        else
+            velocity_rw[2 * edge_index + k] = dot(edge_vec, velocity);
     }
 };

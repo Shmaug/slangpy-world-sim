@@ -21,17 +21,20 @@ static const float M_SQRT3   = 1.732050807568877293527; // sqrt(3)
 static const float M_SQRTPI  = 1.77245385090551602730;  // sqrt(pi)
 static const float M_1_SQRT2 = 0.707106781186547524401; // 1/sqrt(2)
 
+[Differentiable]
 float safe_divide(float a, float b)
 {
     return abs(b) > 0 ? a / b : 0;
 }
 
+[Differentiable]
 vector<float, N> safe_normalize<let N : int>(vector<float, N> vec)
 {
     float n = length(vec);
     return n > 0 ? vec / n : 0;
 }
 
+[Differentiable]
 float sqr(float a)
 {
     return a * a;
@@ -46,11 +49,13 @@ float2 wrap_index(float2 i, float2 dim)
     return (i + dim) % dim;
 }
 
+[Differentiable]
 float luminance(float3 rgb)
 {
     return dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
+[Differentiable]
 bool intersect_sphere(float3 origin, float3 direction, float radius, out float2 t)
 {
     // precise version
@@ -82,6 +87,7 @@ bool intersect_sphere(float3 origin, float3 direction, float radius, out float2 
     return t.y > 0;
 }
 
+[Differentiable]
 float3 uv_to_xyz(float2 uv) {
     return float3(
         sin(uv.y * M_PI) * sin(uv.x * M_2PI),
@@ -89,12 +95,62 @@ float3 uv_to_xyz(float2 uv) {
         sin(uv.y * M_PI) * cos(uv.x * M_2PI)
     );
 }
+[Differentiable]
 float2 xyz_to_uv(float3 xyz)
 {
     return float2(
         -atan2(xyz.x, -xyz.z) * M_1_2PI + 0.5,
         acos(xyz.y) * M_1_PI
     );
+}
+
+
+// cube face order: 0:+X 1:-X 2:+Y 3:-Y 4:+Z 5:-Z
+[Differentiable]
+float3 dir_to_cube_uvw(float3 dir)
+{
+    float3 absDir = abs(dir);
+    float maxAxis, uc, vc;
+    int face;
+
+    if (absDir.x >= absDir.y && absDir.x >= absDir.z)
+    {
+        maxAxis = absDir.x;
+        if (dir.x > 0) { uc = -dir.z; vc = dir.y; face = 0; }
+        else           { uc =  dir.z; vc = dir.y; face = 1; }
+    }
+    else if (absDir.y >= absDir.z)
+    {
+        maxAxis = absDir.y;
+        if (dir.y > 0) { uc = dir.x; vc = -dir.z; face = 2; }
+        else           { uc = dir.x; vc =  dir.z; face = 3; }
+    }
+    else
+    {
+        maxAxis = absDir.z;
+        if (dir.z > 0) { uc =  dir.x; vc = dir.y; face = 4; }
+        else           { uc = -dir.x; vc = dir.y; face = 5; }
+    }
+
+    float2 uv = float2(uc, vc) / maxAxis * 0.5 + 0.5;
+    return float3(uv, face);
+}
+
+[Differentiable]
+float3 cube_uvw_to_dir(float3 uvw)
+{
+    float2 sc = uvw.xy * 2.0 - 1.0;
+    int face = int(uvw.z);
+
+    float3 dir;
+    if      (face == 0) dir = float3( 1.0,  sc.y, -sc.x);
+    else if (face == 1) dir = float3(-1.0,  sc.y,  sc.x);
+    else if (face == 2) dir = float3(sc.x,  1.0,  -sc.y);
+    else if (face == 3) dir = float3(sc.x, -1.0,   sc.y);
+    else if (face == 4) dir = float3(sc.x,  sc.y,   1.0);
+    else                dir = float3(-sc.x, sc.y,  -1.0);
+
+    return normalize(dir);
 }
 
 // xxhash https://github.com/Cyan4973/xxHash
@@ -120,36 +176,55 @@ uint pcg(const uint v)
 
 // B-spline basis function (quadratic)
 [Differentiable]
-float bspline(float r) {
+float bspline(float r)
+{
     r = abs(r);
     if (r < 0.5) return 0.75 - r * r;
     if (r < 1.5) return 0.5 * (1.5 - r) * (1.5 - r);
     return 0.0;
 }
 
+[Differentiable]
 float2x2 inverse(float2x2 M)
 {
     float2x2 inv;
-    float invdet = 1.0f / determinant(M);
-    inv[0][0] = M[1][1] * invdet;
-    inv[1][1] = M[0][0] * invdet;
-    inv[0][1] = -M[0][1] * invdet;
-    inv[1][0] = -M[1][0] * invdet;
+    float det = determinant(M);
+    if (abs(det) > 1e-12)
+    {
+        float invdet = 1.0f / det;
+        inv[0][0] = M[1][1] * invdet;
+        inv[1][1] = M[0][0] * invdet;
+        inv[0][1] = -M[0][1] * invdet;
+        inv[1][0] = -M[1][0] * invdet;
+    }
+    else
+    {
+        inv = 0;
+    }
     return inv;
 }
 
+[Differentiable]
 float3x3 inverse(float3x3 M)
 {
     float3x3 inv;
-    float invdet = 1.0f / determinant(M);
-    inv[0][0] = (M[1][1] * M[2][2] - M[2][1] * M[1][2]) * invdet;
-    inv[0][1] = (M[0][2] * M[2][1] - M[0][1] * M[2][2]) * invdet;
-    inv[0][2] = (M[0][1] * M[1][2] - M[0][2] * M[1][1]) * invdet;
-    inv[1][0] = (M[1][2] * M[2][0] - M[1][0] * M[2][2]) * invdet;
-    inv[1][1] = (M[0][0] * M[2][2] - M[0][2] * M[2][0]) * invdet;
-    inv[1][2] = (M[1][0] * M[0][2] - M[0][0] * M[1][2]) * invdet;
-    inv[2][0] = (M[1][0] * M[2][1] - M[2][0] * M[1][1]) * invdet;
-    inv[2][1] = (M[2][0] * M[0][1] - M[0][0] * M[2][1]) * invdet;
-    inv[2][2] = (M[0][0] * M[1][1] - M[1][0] * M[0][1]) * invdet;
+    float det = determinant(M);
+    if (abs(det) > 1e-12)
+    {
+        float invdet = 1.0f / det;
+        inv[0][0] = (M[1][1] * M[2][2] - M[2][1] * M[1][2]) * invdet;
+        inv[0][1] = (M[0][2] * M[2][1] - M[0][1] * M[2][2]) * invdet;
+        inv[0][2] = (M[0][1] * M[1][2] - M[0][2] * M[1][1]) * invdet;
+        inv[1][0] = (M[1][2] * M[2][0] - M[1][0] * M[2][2]) * invdet;
+        inv[1][1] = (M[0][0] * M[2][2] - M[0][2] * M[2][0]) * invdet;
+        inv[1][2] = (M[1][0] * M[0][2] - M[0][0] * M[1][2]) * invdet;
+        inv[2][0] = (M[1][0] * M[2][1] - M[2][0] * M[1][1]) * invdet;
+        inv[2][1] = (M[2][0] * M[0][1] - M[0][0] * M[2][1]) * invdet;
+        inv[2][2] = (M[0][0] * M[1][1] - M[1][0] * M[0][1]) * invdet;
+    }
+    else
+    {
+        inv = 0;
+    }
     return inv;
 }
