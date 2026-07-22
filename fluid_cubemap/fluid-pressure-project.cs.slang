@@ -20,10 +20,11 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
     uint3 ym = fluid.neighbor_cell(cell, int2( 0,-1));
     uint3 yp = fluid.neighbor_cell(cell, int2( 0, 1));
 
-    float vel_xm = fluid.velocity_in_frame(cell, xm, fluid.velocity_rw[xm]).x;
-    float vel_xp = fluid.velocity_in_frame(cell, xp, fluid.velocity_rw[xp]).x;
-    float vel_ym = fluid.velocity_in_frame(cell, ym, fluid.velocity_rw[ym]).y;
-    float vel_yp = fluid.velocity_in_frame(cell, yp, fluid.velocity_rw[yp]).y;
+    let frame = CubeMapTangentFrame(cube_uvw_to_dir(float3(float2(cell.xy + 0.5) / fluid.resolution, cell.z)));
+    float vel_xm = frame.to_local(fluid.fetch_velocity_rw(xm)).x;
+    float vel_xp = frame.to_local(fluid.fetch_velocity_rw(xp)).x;
+    float vel_ym = frame.to_local(fluid.fetch_velocity_rw(ym)).y;
+    float vel_yp = frame.to_local(fluid.fetch_velocity_rw(yp)).y;
 
     divergence[cell] = 0.5 * ((vel_xp - vel_xm) + (vel_yp - vel_ym));
 }

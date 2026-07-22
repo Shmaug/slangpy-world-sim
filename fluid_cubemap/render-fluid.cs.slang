@@ -40,10 +40,12 @@ void render(uint2 pixel: SV_DispatchThreadID)
 
     float3 ray_dir = get_ray_dir(pixel + 0.5);
 
-    float2 t;
-    if (intersect_sphere(camera_pos, ray_dir, 1, t))
+    float2 ray_t;
+    if (intersect_sphere(camera_pos, ray_dir, 1, ray_t))
     {
-        float3 pos = normalize(camera_pos + ray_dir * t.x);
+        float3 pos = normalize(camera_pos + ray_dir * ray_t.x);
+
+        let frame = CubeMapTangentFrame(pos);
 
         switch ((RenderMode)render_mode)
         {
@@ -61,22 +63,18 @@ void render(uint2 pixel: SV_DispatchThreadID)
             }
             case RenderMode::Tangent:
             {
-                float3 t, b;
-                fluid.get_tangent_space(pos, t, b);
-                c.rgb = t * 0.5 + 0.5;
+                c.rgb = frame.t * 0.5 + 0.5;
                 break;
             }
             case RenderMode::Bitangent:
             {
-                float3 t, b;
-                fluid.get_tangent_space(pos, t, b);
-                c.rgb = b * 0.5 + 0.5;
+                c.rgb = frame.b * 0.5 + 0.5;
                 break;
             }
             case RenderMode::Texels:
             {
                 float3 uvw = dir_to_cube_uvw(pos);
-                uint3 texel = uint3(uvw.xy * fluid.resolution, uvw.z);
+                uint3 texel = uint3(uint2(uvw.xy * fluid.resolution), uint(uvw.z));
 
                 c.rgb = float3(uint3(pcg(texel.x + pcg(texel.y)), pcg(texel.y + pcg(texel.x)), 0) % 255) / 255;
                 c.rgb = lerp(c.rgb, 0.5, 0.75);
@@ -87,7 +85,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
                 {
                     float3 mouse_pos = camera_pos + mouse_ray_dir * mouse_t.x;
                     float3 mouse_uvw = dir_to_cube_uvw(mouse_pos);
-                    uint3 mouse_texel = uint3(mouse_uvw.xy * fluid.resolution, mouse_uvw.z);
+                    uint3 mouse_texel = uint3(uint2(mouse_uvw.xy * fluid.resolution), uint(mouse_uvw.z));
                     if (all(mouse_texel == texel))
                     {
                         c.rgb = 1;

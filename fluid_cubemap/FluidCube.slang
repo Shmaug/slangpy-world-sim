@@ -1,5 +1,39 @@
 import Math;
 
+struct CubeMapTangentFrame
+{
+    float3 n, t, b;
+
+    __init(float3 dir)
+    {
+        n = dir;
+        float3 uvw = dir_to_cube_uvw(dir);
+        let dx = __fwd_diff(cube_uvw_to_dir)(diffPair(uvw, float3(1, 0, 0)));
+        let dy = __fwd_diff(cube_uvw_to_dir)(diffPair(uvw, float3(0, 1, 0)));
+
+        t = normalize(dx.d);
+        
+        // orthonormalize b against t and dir
+        b = dy.d;
+        b -= dir * dot(b, dir);
+        b -=  t * dot(b,  t);
+        b = normalize(b);
+    }
+
+    float2 to_local(float3 vec)
+    {
+        float l = length(vec);
+        vec -= n * dot(vec, n);
+        vec = safe_normalize(vec) * l;
+        return float2(dot(vec, t), dot(vec, b));
+    }
+
+    float3 to_world(float2 vec)
+    {
+        return t * vec.x + b * vec.y;
+    }
+}
+
 struct FluidCube
 {
     // tangent-space velocity
@@ -10,41 +44,6 @@ struct FluidCube
     RWTexture2DArray<float>  smoke_rw;
 
     uint resolution;
-
-    void get_tangent_space(float3 dir, out float3 tangent, out float3 bitangent)
-    {
-        float3 uvw = dir_to_cube_uvw(dir);
-        let dx = __fwd_diff(cube_uvw_to_dir)(diffPair(uvw, float3(1, 0, 0)));
-        let dy = __fwd_diff(cube_uvw_to_dir)(diffPair(uvw, float3(0, 1, 0)));
-
-        tangent = normalize(dx.d - dir * dot(dx.d, dir));
-
-        // Gram-Schmidt: dy's projection onto the tangent plane is not
-        // generally orthogonal to `tangent` (u/v iso-lines are only
-        // perpendicular at a cube face's center), so remove the tangent
-        // component too or world_to_tangent/tangent_to_world won't round-trip.
-        float3 bt = dy.d - dir * dot(dy.d, dir);
-        bt -= tangent * dot(bt, tangent);
-        bitangent = normalize(bt);
-    }
-
-    // convert vec from world-space to tangent-space at dir
-    float2 world_to_tangent(float3 dir, float3 vec)
-    {
-        float3 t, b;
-        get_tangent_space(dir, t, b);
-
-        return float2(dot(vec, t), dot(vec, b));
-    }
-
-    // convert vec from tangent-space at dir to world-space
-    float3 tangent_to_world(float3 dir, float2 vec)
-    {
-        float3 t, b;
-        get_tangent_space(dir, t, b);
-
-        return t * vec.x + b * vec.y;
-    }
 
     // texel index of `cell` offset by one texel along the face's u/v axes,
     // stepping onto the neighboring face (with the correct rotated uv) when
@@ -63,19 +62,6 @@ struct FluidCube
         float3 uvw = dir_to_cube_uvw(dir);
         uint2 wrapped = uint2(clamp(int2(uvw.xy * resolution), 0, int(resolution) - 1));
         return uint3(wrapped, uint(uvw.z));
-    }
-
-    // reinterpret a tangent-space velocity stored at texel `ncell` in the
-    // tangent frame of texel `cell`; same-face neighbors share (approximately)
-    // the same frame, cross-face neighbors need a proper world-space transport
-    float2 velocity_in_frame(uint3 cell, uint3 ncell, float2 nvel)
-    {
-        if (ncell.z == cell.z)
-            return nvel;
-
-        float3 dir  = cube_uvw_to_dir(float3((cell.xy  + 0.5) / float(resolution), cell.z));
-        float3 ndir = cube_uvw_to_dir(float3((ncell.xy + 0.5) / float(resolution), ncell.z));
-        return world_to_tangent(dir, tangent_to_world(ndir, nvel));
     }
 
     // assumes dir is normalized
@@ -107,9 +93,15 @@ struct FluidCube
     float3 fetch_velocity(uint3 texel)
     {
         float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        return tangent_to_world(dir, velocity[texel]);
+        return CubeMapTangentFrame(dir).to_world(velocity[texel]);
+    }
+    float3 fetch_velocity_rw(uint3 texel)
+    {
+        float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
+        return CubeMapTangentFrame(dir).to_world(velocity_rw[texel]);
     }
 
+    // assumes dir is normalized
     float3 sample_velocity(float3 dir)
     {
         float3 uvw = dir_to_cube_uvw(dir);
@@ -132,8 +124,6 @@ struct FluidCube
         float3 s01 = fetch_velocity(neighbor_cell(home_cell, off + int2(0, 1)));
         float3 s11 = fetch_velocity(neighbor_cell(home_cell, off + int2(1, 1)));
 
-        float3 velocity = lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
-
-        return velocity;
+        return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
     }
 };

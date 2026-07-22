@@ -157,10 +157,9 @@ class CubeFluidSimulator:
         self.conserve_smoke_kernel.dispatch(
             [ self.resolution, self.resolution, 6 ],
             vars={
+                "fluid":      self.fluid_vars,
                 "sum_pre":    self.pre_sum_texture,
                 "sum_post":   self.post_sum_texture,
-                "smoke_rw":   self.fluid_vars["smoke_rw"],
-                "resolution": self.resolution,
                 "mip_count":  self.pre_sum_texture.mip_count
             },
             command_encoder=command_encoder
