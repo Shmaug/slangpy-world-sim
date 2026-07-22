@@ -13,12 +13,16 @@ class CubeFluidSimulator:
         
         self.emit_kernel = create_kernel("fluid-init.cs.slang", "emit_plume")
         self.advect_kernel = create_kernel("fluid-advection.cs.slang", "advect")
+        self.conserve_smoke_kernel = create_kernel("fluid-conservation.cs.slang", "conserve_smoke")
         self.compute_divergence_kernel     = create_kernel("fluid-pressure-project.cs.slang", "compute_divergence")
         self.pressure_project_kernel       = create_kernel("fluid-pressure-project.cs.slang", "step")
         self.pressure_project_apply_kernel = create_kernel("fluid-pressure-project.cs.slang", "apply")
 
         self.reset = True
         self.step_once = False
+
+        self.pre_sum_texture:spy.Texture = None # type:ignore
+        self.post_sum_texture:spy.Texture = None # type:ignore
 
         self.resolution = 1024
         self.fluid_vars = {}
@@ -75,6 +79,15 @@ class CubeFluidSimulator:
             }
             self.reset = True
 
+            self.pre_sum_texture, self.post_sum_texture = [ self.device.create_texture(
+                type = spy.TextureType.texture_2d,
+                format = spy.Format.r32_float,
+                width = self.resolution * 6,
+                height = self.resolution,
+                mip_count = int(spy.math.ceil(spy.math.log2(self.resolution))) + 1,
+                usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
+            ) for _ in range(2) ]
+
         create_textures()
 
         if widget is not None:
@@ -113,6 +126,42 @@ class CubeFluidSimulator:
             vars={
                 "fluid": self.fluid_vars,
                 "dt": self.dt.value,
+            },
+            command_encoder=command_encoder
+        )
+
+        # copy smoke to temporary 2d texture
+        for i in range(6):
+            command_encoder.copy_texture(
+                self.pre_sum_texture,
+                spy.SubresourceRange({ "layer": 0, "layer_count": 1, "mip": 0, "mip_count": 1 }),
+                spy.uint3(self.resolution * i, 0, 0),
+                self.fluid_vars["smoke"],
+                spy.SubresourceRange({"layer": i, "layer_count": 1, "mip": 0, "mip_count": 1}),
+                spy.uint3(0,0,0),
+                spy.uint3(self.resolution, self.resolution, 1)
+            )
+            command_encoder.copy_texture(
+                self.post_sum_texture,
+                spy.SubresourceRange({ "layer": 0, "layer_count": 1, "mip": 0, "mip_count": 1 }),
+                spy.uint3(self.resolution * i, 0, 0),
+                self.fluid_vars["smoke_rw"],
+                spy.SubresourceRange({"layer": i, "layer_count": 1, "mip": 0, "mip_count": 1}),
+                spy.uint3(0,0,0),
+                spy.uint3(self.resolution, self.resolution, 1)
+            )
+        # compute total amount of smoke via mip maps
+        command_encoder.generate_mips(self.pre_sum_texture)
+        command_encoder.generate_mips(self.post_sum_texture)
+        # ensure total amount of smoke stays the same after advection
+        self.conserve_smoke_kernel.dispatch(
+            [ self.resolution, self.resolution, 6 ],
+            vars={
+                "sum_pre":    self.pre_sum_texture,
+                "sum_post":   self.post_sum_texture,
+                "smoke_rw":   self.fluid_vars["smoke_rw"],
+                "resolution": self.resolution,
+                "mip_count":  self.pre_sum_texture.mip_count
             },
             command_encoder=command_encoder
         )
