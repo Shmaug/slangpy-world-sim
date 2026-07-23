@@ -21,14 +21,16 @@ class CubeFluidSimulator:
         self.reset = True
         self.step_once = False
 
+        self.smoke_tex:list[spy.Texture] = []
+        self.velocity_tex:list[spy.Texture] = []
+        self.divergence_tex:spy.Texture = None # type:ignore
+        self.pressure_correction_tex:list[spy.Texture] = []
         self.pre_sum_texture:spy.Texture = None # type:ignore
         self.post_sum_texture:spy.Texture = None # type:ignore
 
         self.resolution = 1<<10
-        self.fluid_vars = {}
-        self.pressure_project_vars = {}
         def create_textures():
-            smoke_tex = [self.device.create_texture(
+            self.smoke_tex = [self.device.create_texture(
                 type = spy.TextureType.texture_2d_array,
                 format = spy.Format.r32_float,
                 width = self.resolution,
@@ -36,7 +38,7 @@ class CubeFluidSimulator:
                 array_length = 6,
                 usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
             ) for _ in range(2) ]
-            velocity_tex = [self.device.create_texture(
+            self.velocity_tex = [self.device.create_texture(
                 type = spy.TextureType.texture_2d_array,
                 format = spy.Format.rg32_float,
                 width = self.resolution,
@@ -44,41 +46,22 @@ class CubeFluidSimulator:
                 array_length = 6,
                 usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
             ) for _ in range(2) ]
-            self.fluid_vars = {
-                "smoke": smoke_tex[0],
-                "smoke_rw": smoke_tex[1],
-                "velocity": velocity_tex[0],
-                "velocity_rw": velocity_tex[1],
-                "resolution": self.resolution,
-            }
-            self.pressure_project_vars = {
-                "divergence": self.device.create_texture(
-                    type = spy.TextureType.texture_2d_array,
-                    format = spy.Format.rg32_float,
-                    width = self.resolution,
-                    height = self.resolution,
-                    array_length = 6,
-                    usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
-                ),
-                "pressure_correction": self.device.create_texture(
-                    type = spy.TextureType.texture_2d_array,
-                    format = spy.Format.r32_float,
-                    width = self.resolution,
-                    height = self.resolution,
-                    array_length = 6,
-                    usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
-                ),
-                "pressure_correction_rw": self.device.create_texture(
-                    type = spy.TextureType.texture_2d_array,
-                    format = spy.Format.r32_float,
-                    width = self.resolution,
-                    height = self.resolution,
-                    array_length = 6,
-                    usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
-                ),
-            }
-            self.reset = True
-
+            self.divergence_tex = self.device.create_texture(
+                type = spy.TextureType.texture_2d_array,
+                format = spy.Format.rg32_float,
+                width = self.resolution,
+                height = self.resolution,
+                array_length = 6,
+                usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
+            )
+            self.pressure_correction_tex = [ self.device.create_texture(
+                type = spy.TextureType.texture_2d_array,
+                format = spy.Format.r32_float,
+                width = self.resolution,
+                height = self.resolution,
+                array_length = 6,
+                usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
+            ) for _ in range(2) ]
             self.pre_sum_texture, self.post_sum_texture = [ self.device.create_texture(
                 type = spy.TextureType.texture_2d,
                 format = spy.Format.r32_float,
@@ -87,6 +70,8 @@ class CubeFluidSimulator:
                 mip_count = int(spy.math.ceil(spy.math.log2(self.resolution))) + 1,
                 usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
             ) for _ in range(2) ]
+
+            self.reset = True
 
         create_textures()
 
@@ -106,29 +91,36 @@ class CubeFluidSimulator:
             self.dt = spy.ui.DragFloat(widget, "Timestep", 0.01)
             self.emit_plume = spy.ui.CheckBox(widget, "Emit plume")
 
+    def shader_vars(self):
+        return {
+            "_smoke": self.smoke_tex[0],
+            "_smoke_rw": self.smoke_tex[1],
+            "_velocity": self.velocity_tex[0],
+            "_velocity_rw": self.velocity_tex[1],
+            "resolution": self.resolution,
+        }
+
     def step(self, command_encoder:spy.CommandEncoder, dt):
-        def swap(vars, name):
-            vars[name], vars[f"{name}_rw"] = vars[f"{name}_rw"], vars[name]
+        def swap(vars):
+            vars[0], vars[1] = vars[1], vars[0]
 
         if self.reset:
-            for n in ["velocity", "smoke"]:
-                command_encoder.clear_texture_float(self.fluid_vars[n])
-                command_encoder.clear_texture_float(self.fluid_vars[f"{n}_rw"])
+            for t in self.smoke_tex + self.velocity_tex:
+                command_encoder.clear_texture_float(t)
             self.reset = False
 
         if self.paused.value and not self.step_once:
             return
         self.step_once = False
 
+        def dispatch(kernel, vars):
+            kernel.dispatch([self.resolution, self.resolution, 6], vars, command_encoder)
+
         # advect velocity and smoke
-        self.advect_kernel.dispatch(
-            [ self.resolution, self.resolution, 6 ],
-            vars={
-                "fluid": self.fluid_vars,
-                "dt": self.dt.value,
-            },
-            command_encoder=command_encoder
-        )
+        dispatch(self.advect_kernel, {
+            "fluid": self.shader_vars(),
+            "dt": self.dt.value,
+        })
 
         # copy smoke to temporary 2d texture
         for i in range(6):
@@ -136,7 +128,7 @@ class CubeFluidSimulator:
                 self.pre_sum_texture,
                 spy.SubresourceRange({ "layer": 0, "layer_count": 1, "mip": 0, "mip_count": 1 }),
                 spy.uint3(self.resolution * i, 0, 0),
-                self.fluid_vars["smoke"],
+                self.smoke_tex[0],
                 spy.SubresourceRange({"layer": i, "layer_count": 1, "mip": 0, "mip_count": 1}),
                 spy.uint3(0,0,0),
                 spy.uint3(self.resolution, self.resolution, 1)
@@ -145,7 +137,7 @@ class CubeFluidSimulator:
                 self.post_sum_texture,
                 spy.SubresourceRange({ "layer": 0, "layer_count": 1, "mip": 0, "mip_count": 1 }),
                 spy.uint3(self.resolution * i, 0, 0),
-                self.fluid_vars["smoke_rw"],
+                self.smoke_tex[1],
                 spy.SubresourceRange({"layer": i, "layer_count": 1, "mip": 0, "mip_count": 1}),
                 spy.uint3(0,0,0),
                 spy.uint3(self.resolution, self.resolution, 1)
@@ -154,47 +146,34 @@ class CubeFluidSimulator:
         command_encoder.generate_mips(self.pre_sum_texture)
         command_encoder.generate_mips(self.post_sum_texture)
         # ensure total amount of smoke stays the same after advection
-        self.conserve_smoke_kernel.dispatch(
-            [ self.resolution, self.resolution, 6 ],
-            vars={
-                "fluid":      self.fluid_vars,
-                "sum_pre":    self.pre_sum_texture,
-                "sum_post":   self.post_sum_texture,
-                "mip_count":  self.pre_sum_texture.mip_count
-            },
-            command_encoder=command_encoder
-        )
+        dispatch(self.conserve_smoke_kernel, {
+            "fluid":      self.shader_vars(),
+            "sum_pre":    self.pre_sum_texture,
+            "sum_post":   self.post_sum_texture,
+            "mip_count":  self.pre_sum_texture.mip_count
+        })
 
         if self.solver_iterations.value > 0:
-            self.compute_divergence_kernel.dispatch(
-                [ self.resolution, self.resolution, 6 ],
-                vars=self.pressure_project_vars | { "fluid": self.fluid_vars },
-                command_encoder=command_encoder
-            )
+            def pressure_project_vars():
+                return {
+                    "fluid": self.shader_vars(),
+                    "divergence": self.divergence_tex,
+                    "pressure_correction": self.pressure_correction_tex[0],
+                    "pressure_correction_rw": self.pressure_correction_tex[1],
+                }
+            dispatch(self.compute_divergence_kernel, pressure_project_vars())
             for _ in range(self.solver_iterations.value):
-                self.pressure_project_kernel.dispatch(
-                    [ self.resolution, self.resolution, 6 ],
-                    vars=self.pressure_project_vars | { "fluid": self.fluid_vars },
-                    command_encoder=command_encoder
-                )
-                swap(self.pressure_project_vars, "pressure_correction")
-            self.pressure_project_apply_kernel.dispatch(
-                [ self.resolution, self.resolution, 6 ],
-                vars=self.pressure_project_vars | { "fluid": self.fluid_vars },
-                command_encoder=command_encoder
-            )
+                dispatch(self.pressure_project_kernel, pressure_project_vars())
+                swap(self.pressure_correction_tex)
+            dispatch(self.pressure_project_apply_kernel, pressure_project_vars())
 
         if self.emit_plume.value:
-            self.emit_kernel.dispatch(
-                [ self.resolution, self.resolution, 6 ],
-                vars={
-                    "fluid":        self.fluid_vars,
-                    "target_pos":   spy.float3(0,0,1),
-                    "target_angle": np.radians(10),
-                    "target_dir":   spy.float3(0,1,0),
-                },
-                command_encoder=command_encoder
-            )
+            dispatch(self.emit_kernel, {
+                "fluid":        self.shader_vars(),
+                "target_pos":   spy.float3(0,0,1),
+                "target_angle": np.radians(10),
+                "target_dir":   spy.float3(0,1,0),
+            })
         
-        swap(self.fluid_vars, "smoke")
-        swap(self.fluid_vars, "velocity")
+        swap(self.smoke_tex)
+        swap(self.velocity_tex)

@@ -37,13 +37,45 @@ struct CubeMapTangentFrame
 struct FluidCube
 {
     // tangent-space velocity
-    Texture2DArray<float2>    velocity;
-    RWTexture2DArray<float2>  velocity_rw;
+    Texture2DArray<float2>    _velocity;
+    RWTexture2DArray<float2>  _velocity_rw;
 
-    Texture2DArray<float>    smoke;
-    RWTexture2DArray<float>  smoke_rw;
+    Texture2DArray<float>    _smoke;
+    RWTexture2DArray<float>  _smoke_rw;
 
     uint resolution;
+
+    float2 load_velocity(uint3 texel)
+    {
+        return _velocity[texel];
+        // return _velocity[texel.xy + uint2(texel.z * resolution, 0)];
+    }
+    float2 load_velocity_rw(uint3 texel)
+    {
+        return _velocity_rw[texel];
+        // return _velocity_rw[texel.xy + uint2(texel.z * resolution, 0)];
+    }
+    void store_velocity(uint3 texel, float2 newValue)
+    {
+        _velocity_rw[texel] = newValue;
+        // _velocity_rw[texel.xy + uint2(texel.z * resolution, 0)] = newValue;
+    }
+
+    float load_smoke(uint3 texel)
+    {
+        return _smoke[texel];
+        // return _smoke[texel.xy + uint2(texel.z * resolution, 0)];
+    }
+    float load_smoke_rw(uint3 texel)
+    {
+        return _smoke_rw[texel];
+        // return _smoke_rw[texel.xy + uint2(texel.z * resolution, 0)];
+    }
+    void store_smoke(uint3 texel, float newValue)
+    {
+        _smoke_rw[texel] = newValue;
+        // _smoke_rw[texel.xy + uint2(texel.z * resolution, 0)] = newValue;
+    }
 
     // texel index of `cell` offset by one texel along the face's u/v axes,
     // stepping onto the neighboring face (with the correct rotated uv) when
@@ -64,6 +96,7 @@ struct FluidCube
         return uint3(wrapped, uint(uvw.z));
     }
 
+
     // assumes dir is normalized
     float sample_smoke(float3 dir)
     {
@@ -82,23 +115,23 @@ struct FluidCube
         float2 frac = frac_uv - 0.5 - float2(off);
 
         uint3 home_cell = uint3(uint2(home), uint(uvw.z));
-        float s00 = smoke[neighbor_cell(home_cell, off)];
-        float s10 = smoke[neighbor_cell(home_cell, off + int2(1, 0))];
-        float s01 = smoke[neighbor_cell(home_cell, off + int2(0, 1))];
-        float s11 = smoke[neighbor_cell(home_cell, off + int2(1, 1))];
+        float s00 = load_smoke( neighbor_cell(home_cell, off) );
+        float s10 = load_smoke( neighbor_cell(home_cell, off + int2(1, 0)) );
+        float s01 = load_smoke( neighbor_cell(home_cell, off + int2(0, 1)) );
+        float s11 = load_smoke( neighbor_cell(home_cell, off + int2(1, 1)) );
 
         return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
     }
 
-    float3 fetch_velocity(uint3 texel)
+    float3 load_world_space_velocity(uint3 texel)
     {
         float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        return CubeMapTangentFrame(dir).to_world(velocity[texel]);
+        return CubeMapTangentFrame(dir).to_world(load_velocity(texel));
     }
-    float3 fetch_velocity_rw(uint3 texel)
+    float3 load_world_space_velocity_rw(uint3 texel)
     {
         float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        return CubeMapTangentFrame(dir).to_world(velocity_rw[texel]);
+        return CubeMapTangentFrame(dir).to_world(load_velocity_rw(texel));
     }
 
     // assumes dir is normalized
@@ -119,10 +152,10 @@ struct FluidCube
         float2 frac = frac_uv - 0.5 - float2(off);
 
         uint3 home_cell = uint3(uint2(home), uint(uvw.z));
-        float3 s00 = fetch_velocity(neighbor_cell(home_cell, off));
-        float3 s10 = fetch_velocity(neighbor_cell(home_cell, off + int2(1, 0)));
-        float3 s01 = fetch_velocity(neighbor_cell(home_cell, off + int2(0, 1)));
-        float3 s11 = fetch_velocity(neighbor_cell(home_cell, off + int2(1, 1)));
+        float3 s00 = load_world_space_velocity(neighbor_cell(home_cell, off));
+        float3 s10 = load_world_space_velocity(neighbor_cell(home_cell, off + int2(1, 0)));
+        float3 s01 = load_world_space_velocity(neighbor_cell(home_cell, off + int2(0, 1)));
+        float3 s11 = load_world_space_velocity(neighbor_cell(home_cell, off + int2(1, 1)));
 
         return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
     }

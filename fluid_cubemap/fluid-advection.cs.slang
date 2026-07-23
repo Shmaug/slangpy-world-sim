@@ -30,6 +30,6 @@ void advect(uint3 thread: SV_DispatchThreadID)
     float sampled_smoke = fluid.sample_smoke(sampled_pos);
     float3 sampled_velocity = fluid.sample_velocity(sampled_pos);
 
-    fluid.smoke_rw[thread] = sampled_smoke;
-    fluid.velocity_rw[thread] = CubeMapTangentFrame(pos).to_local(sampled_velocity);
+    fluid.store_smoke(thread, sampled_smoke);
+    fluid.store_velocity(thread, CubeMapTangentFrame(pos).to_local(sampled_velocity));
 }

@@ -19,5 +19,5 @@ void conserve_smoke(uint3 thread: SV_DispatchThreadID)
         pre += sum_pre.Load(uint3(i, 0, mip_count-1));
         post += sum_post.Load(uint3(i, 0, mip_count-1));
     }
-    fluid.smoke_rw[thread] *= abs(post) > 0 ? pre / post : 0;
+    fluid.store_smoke(thread, fluid.load_smoke_rw(thread) * (abs(post) > 0 ? pre / post : 0));
 }

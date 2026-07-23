@@ -144,7 +144,7 @@ class App:
             self.render_kernel.dispatch(
                 [ surface_texture.width, surface_texture.height, 1 ],
                 {
-                    "fluid": self.simulator.fluid_vars,
+                    "fluid": self.simulator.shader_vars(),
                     "view_projection": view_projection,
                     "inv_view_projection": spy.math.inverse(view_projection),
                     "camera_pos": self.camera.position,
