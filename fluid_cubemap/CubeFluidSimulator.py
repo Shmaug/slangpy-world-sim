@@ -24,7 +24,7 @@ class CubeFluidSimulator:
         self.pre_sum_texture:spy.Texture = None # type:ignore
         self.post_sum_texture:spy.Texture = None # type:ignore
 
-        self.resolution = 1024
+        self.resolution = 1<<10
         self.fluid_vars = {}
         self.pressure_project_vars = {}
         def create_textures():
@@ -96,12 +96,12 @@ class CubeFluidSimulator:
             def step_cb():
                 self.step_once = True
             def res_cb(value):
-                self.resolution = min(max(1,self.resolution_ui.value), 4096)
+                self.resolution = min(max(1,1<<self.resolution_ui.value), 1<<12)
                 create_textures()
             self.paused = spy.ui.CheckBox(widget, "Pause")
             spy.ui.Button(widget, "Step", callback=step_cb)
             self.reset_button = spy.ui.Button(widget, "Reset", callback=reset_cb)
-            self.resolution_ui = spy.ui.DragInt(widget, "Resolution", value=1024, min=1, max=4096, callback=res_cb)
+            self.resolution_ui = spy.ui.ComboBox(widget, "Resolution", 10, items=[ str(1 << i) for i in range(13) ], callback=res_cb)
             self.solver_iterations = spy.ui.DragInt(widget, "Solver iterations", value=10)
             self.dt = spy.ui.DragFloat(widget, "Timestep", 0.01)
             self.emit_plume = spy.ui.CheckBox(widget, "Emit plume")
