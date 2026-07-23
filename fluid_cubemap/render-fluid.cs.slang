@@ -99,7 +99,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
                     };
                     for (uint i = 0; i < 4; i++)
                     {
-                        uint3 neighbor_texel = fluid.neighbor_cell(texel, neighbors[i]);
+                        uint3 neighbor_texel = cube_neighbor_texel(texel, neighbors[i], fluid.resolution);
                         if (all(mouse_texel == neighbor_texel))
                         {
                             c.rgb = float3(1, 0, 0);
