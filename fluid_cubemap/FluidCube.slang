@@ -37,44 +37,38 @@ struct CubeMapTangentFrame
 struct FluidCube
 {
     // tangent-space velocity
-    Texture2DArray<float2>    _velocity;
-    RWTexture2DArray<float2>  _velocity_rw;
+    Texture2D<float2>   _velocity;
+    RWTexture2D<float2> _velocity_rw;
 
-    Texture2DArray<float>    _smoke;
-    RWTexture2DArray<float>  _smoke_rw;
+    Texture2D<float>   _smoke;
+    RWTexture2D<float> _smoke_rw;
 
     uint resolution;
 
     float2 load_velocity(uint3 texel)
     {
-        return _velocity[texel];
-        // return _velocity[texel.xy + uint2(texel.z * resolution, 0)];
+        return _velocity[texel.xy + uint2(texel.z * resolution, 0)];
     }
     float2 load_velocity_rw(uint3 texel)
     {
-        return _velocity_rw[texel];
-        // return _velocity_rw[texel.xy + uint2(texel.z * resolution, 0)];
+        return _velocity_rw[texel.xy + uint2(texel.z * resolution, 0)];
     }
     void store_velocity(uint3 texel, float2 newValue)
     {
-        _velocity_rw[texel] = newValue;
-        // _velocity_rw[texel.xy + uint2(texel.z * resolution, 0)] = newValue;
+        _velocity_rw[texel.xy + uint2(texel.z * resolution, 0)] = newValue;
     }
 
     float load_smoke(uint3 texel)
     {
-        return _smoke[texel];
-        // return _smoke[texel.xy + uint2(texel.z * resolution, 0)];
+        return _smoke[texel.xy + uint2(texel.z * resolution, 0)];
     }
     float load_smoke_rw(uint3 texel)
     {
-        return _smoke_rw[texel];
-        // return _smoke_rw[texel.xy + uint2(texel.z * resolution, 0)];
+        return _smoke_rw[texel.xy + uint2(texel.z * resolution, 0)];
     }
     void store_smoke(uint3 texel, float newValue)
     {
-        _smoke_rw[texel] = newValue;
-        // _smoke_rw[texel.xy + uint2(texel.z * resolution, 0)] = newValue;
+        _smoke_rw[texel.xy + uint2(texel.z * resolution, 0)] = newValue;
     }
 
     // texel index of `cell` offset by one texel along the face's u/v axes,

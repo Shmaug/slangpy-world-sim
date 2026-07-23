@@ -25,49 +25,36 @@ class CubeFluidSimulator:
         self.velocity_tex:list[spy.Texture] = []
         self.divergence_tex:spy.Texture = None # type:ignore
         self.pressure_correction_tex:list[spy.Texture] = []
-        self.pre_sum_texture:spy.Texture = None # type:ignore
-        self.post_sum_texture:spy.Texture = None # type:ignore
 
         self.resolution = 1<<10
         def create_textures():
             self.smoke_tex = [self.device.create_texture(
-                type = spy.TextureType.texture_2d_array,
+                type = spy.TextureType.texture_2d,
                 format = spy.Format.r32_float,
-                width = self.resolution,
+                width = 6 * self.resolution,
                 height = self.resolution,
-                array_length = 6,
+                mip_count = int(spy.math.ceil(spy.math.log2(self.resolution))) + 1,
                 usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
             ) for _ in range(2) ]
             self.velocity_tex = [self.device.create_texture(
-                type = spy.TextureType.texture_2d_array,
+                type = spy.TextureType.texture_2d,
                 format = spy.Format.rg32_float,
-                width = self.resolution,
+                width = 6 * self.resolution,
                 height = self.resolution,
-                array_length = 6,
                 usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
             ) for _ in range(2) ]
             self.divergence_tex = self.device.create_texture(
-                type = spy.TextureType.texture_2d_array,
+                type = spy.TextureType.texture_2d,
                 format = spy.Format.rg32_float,
-                width = self.resolution,
+                width = 6 * self.resolution,
                 height = self.resolution,
-                array_length = 6,
                 usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
             )
             self.pressure_correction_tex = [ self.device.create_texture(
-                type = spy.TextureType.texture_2d_array,
-                format = spy.Format.r32_float,
-                width = self.resolution,
-                height = self.resolution,
-                array_length = 6,
-                usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
-            ) for _ in range(2) ]
-            self.pre_sum_texture, self.post_sum_texture = [ self.device.create_texture(
                 type = spy.TextureType.texture_2d,
                 format = spy.Format.r32_float,
-                width = self.resolution * 6,
+                width = 6 * self.resolution,
                 height = self.resolution,
-                mip_count = int(spy.math.ceil(spy.math.log2(self.resolution))) + 1,
                 usage = spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access
             ) for _ in range(2) ]
 
@@ -122,35 +109,15 @@ class CubeFluidSimulator:
             "dt": self.dt.value,
         })
 
-        # copy smoke to temporary 2d texture
-        for i in range(6):
-            command_encoder.copy_texture(
-                self.pre_sum_texture,
-                spy.SubresourceRange({ "layer": 0, "layer_count": 1, "mip": 0, "mip_count": 1 }),
-                spy.uint3(self.resolution * i, 0, 0),
-                self.smoke_tex[0],
-                spy.SubresourceRange({"layer": i, "layer_count": 1, "mip": 0, "mip_count": 1}),
-                spy.uint3(0,0,0),
-                spy.uint3(self.resolution, self.resolution, 1)
-            )
-            command_encoder.copy_texture(
-                self.post_sum_texture,
-                spy.SubresourceRange({ "layer": 0, "layer_count": 1, "mip": 0, "mip_count": 1 }),
-                spy.uint3(self.resolution * i, 0, 0),
-                self.smoke_tex[1],
-                spy.SubresourceRange({"layer": i, "layer_count": 1, "mip": 0, "mip_count": 1}),
-                spy.uint3(0,0,0),
-                spy.uint3(self.resolution, self.resolution, 1)
-            )
         # compute total amount of smoke via mip maps
-        command_encoder.generate_mips(self.pre_sum_texture)
-        command_encoder.generate_mips(self.post_sum_texture)
+        command_encoder.generate_mips(self.smoke_tex[0])
+        command_encoder.generate_mips(self.smoke_tex[1])
         # ensure total amount of smoke stays the same after advection
         dispatch(self.conserve_smoke_kernel, {
             "fluid":      self.shader_vars(),
-            "sum_pre":    self.pre_sum_texture,
-            "sum_post":   self.post_sum_texture,
-            "mip_count":  self.pre_sum_texture.mip_count
+            "sum_pre":    self.smoke_tex[0],
+            "sum_post":   self.smoke_tex[1],
+            "mip_count":  self.smoke_tex[0].mip_count
         })
 
         if self.solver_iterations.value > 0:
