@@ -25,7 +25,7 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
         float normalized_dist = angle / (target_angle * 2.0);
         float gaussian = exp(-normalized_dist * normalized_dist * 4.0);
 
-        fluid.store_smoke(thread, fluid.load_smoke_rw(thread) + gaussian);
-        fluid.store_velocity(thread, fluid.load_velocity_rw(thread) + gaussian * CubeMapTangentFrame(pos).to_local(target_dir));
+        fluid._smoke_rw[fluid.flatten_index(thread)] += gaussian;
+        fluid._velocity_rw[fluid.flatten_index(thread)] += gaussian * CubeMapTangentFrame(pos).to_local(target_dir);
     }
 }

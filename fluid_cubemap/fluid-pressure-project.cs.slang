@@ -6,10 +6,10 @@ uniform FluidCube fluid;
 // `compute_divergence` and `apply` always operate at mip 0
 uniform uint mip_level;
 
-Texture2D<float>   divergence;
-RWTexture2D<float> divergence_rw;
-Texture2D<float>   pressure_correction;
-RWTexture2D<float> pressure_correction_rw;
+StructuredBuffer<float>   divergence;
+RWStructuredBuffer<float> divergence_rw;
+StructuredBuffer<float>   pressure_correction;
+RWStructuredBuffer<float> pressure_correction_rw;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -20,18 +20,13 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
 
     uint3 cell = thread;
     
-    uint3 xm = cube_neighbor_texel(cell, int2(-1, 0), fluid.resolution);
-    uint3 xp = cube_neighbor_texel(cell, int2( 1, 0), fluid.resolution);
-    uint3 ym = cube_neighbor_texel(cell, int2( 0,-1), fluid.resolution);
-    uint3 yp = cube_neighbor_texel(cell, int2( 0, 1), fluid.resolution);
-
     let frame = CubeMapTangentFrame(cube_uvw_to_dir(float3(float2(cell.xy + 0.5) / fluid.resolution, cell.z)));
-    float vel_xm = frame.to_local(fluid.load_world_space_velocity_rw(xm)).x;
-    float vel_xp = frame.to_local(fluid.load_world_space_velocity_rw(xp)).x;
-    float vel_ym = frame.to_local(fluid.load_world_space_velocity_rw(ym)).y;
-    float vel_yp = frame.to_local(fluid.load_world_space_velocity_rw(yp)).y;
+    float vel_xm = frame.to_local(fluid.load_world_space_velocity_rw(fluid.get_neighbor(cell, int2(-1, 0)))).x;
+    float vel_xp = frame.to_local(fluid.load_world_space_velocity_rw(fluid.get_neighbor(cell, int2( 1, 0)))).x;
+    float vel_ym = frame.to_local(fluid.load_world_space_velocity_rw(fluid.get_neighbor(cell, int2( 0,-1)))).y;
+    float vel_yp = frame.to_local(fluid.load_world_space_velocity_rw(fluid.get_neighbor(cell, int2( 0, 1)))).y;
 
-    divergence_rw[cube_to_2d(cell, fluid.resolution)] = 0.5 * ((vel_xp - vel_xm) + (vel_yp - vel_ym));
+    divergence_rw[flatten_cube_texel(cell, fluid.resolution)] = 0.5 * ((vel_xp - vel_xm) + (vel_yp - vel_ym));
 }
 
 [shader("compute")]
@@ -45,14 +40,14 @@ void step(uint3 thread: SV_DispatchThreadID)
     uint3 cell = thread;
 
     float p = 0;
-    p += pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2(-1, 0), res), res), mip_level));
-    p += pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2( 1, 0), res), res), mip_level));
-    p += pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2( 0,-1), res), res), mip_level));
-    p += pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2( 0, 1), res), res), mip_level));
+    p += pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2(-1, 0), mip_level), mip_level)];
+    p += pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2( 1, 0), mip_level), mip_level)];
+    p += pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2( 0,-1), mip_level), mip_level)];
+    p += pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2( 0, 1), mip_level), mip_level)];
 
-    p -= divergence.Load(uint3(cube_to_2d(cell, res), mip_level));
+    p -= divergence[fluid.flatten_index(cell, mip_level)];
 
-    pressure_correction_rw[cube_to_2d(cell, res)] = p * 0.25;
+    pressure_correction_rw[fluid.flatten_index(cell, mip_level)] = p * 0.25;
 }
 
 [shader("compute")]
@@ -67,7 +62,7 @@ void fine_to_coarse(uint3 thread: SV_DispatchThreadID)
 
     float3 dir = cube_uvw_to_dir(float3((float2(cell.xy) + 0.5) / coarse_res, cell.z));
     float3 uvw = dir_to_cube_uvw(dir);
-    pressure_correction_rw[cube_to_2d(cell, coarse_res)] = sample_cube(pressure_correction, uvw, mip_level - 1);
+    pressure_correction_rw[fluid.flatten_index(cell, mip_level)] = sample_cube(pressure_correction, fluid.resolution, uvw, mip_level - 1);
 }
 
 [shader("compute")]
@@ -82,7 +77,7 @@ void coarse_to_fine(uint3 thread: SV_DispatchThreadID)
     
     float3 dir = cube_uvw_to_dir(float3((float2(cell.xy) + 0.5) / fine_res, cell.z));
     float3 uvw = dir_to_cube_uvw(dir);
-    pressure_correction_rw[cube_to_2d(cell, fine_res)] = sample_cube(pressure_correction, uvw, mip_level + 1);
+    pressure_correction_rw[fluid.flatten_index(cell, mip_level)] = sample_cube(pressure_correction, fluid.resolution, uvw, mip_level + 1);
 }
 
 [shader("compute")]
@@ -94,12 +89,12 @@ void apply(uint3 thread: SV_DispatchThreadID)
 
     uint3 cell = thread;
 
-    float px0 = pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2(-1, 0), fluid.resolution), fluid.resolution), 0));
-    float px1 = pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2( 1, 0), fluid.resolution), fluid.resolution), 0));
-    float py0 = pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2( 0,-1), fluid.resolution), fluid.resolution), 0));
-    float py1 = pressure_correction.Load(uint3(cube_to_2d(cube_neighbor_texel(cell, int2( 0, 1), fluid.resolution), fluid.resolution), 0));
+    float px0 = pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2(-1, 0)))];
+    float px1 = pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2( 1, 0)))];
+    float py0 = pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2( 0,-1)))];
+    float py1 = pressure_correction[fluid.flatten_index(fluid.get_neighbor(cell, int2( 0, 1)))];
 
     float2 grad = 0.5 * float2(px1 - px0, py1 - py0);
 
-    fluid.store_velocity(cell, fluid.load_velocity_rw(cell) - grad);
+    fluid._velocity_rw[fluid.flatten_index(cell)] -= grad;
 }

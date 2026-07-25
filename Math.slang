@@ -49,6 +49,25 @@ float2 wrap_index(float2 i, float2 dim)
     return (i + dim) % dim;
 }
 
+// spreads the low 16 bits of x so a 0 bit follows each original bit,
+// leaving room to interleave with a second such value
+uint _morton_part1by1(uint x)
+{
+    x &= 0x0000ffff;
+    x = (x | (x << 8)) & 0x00ff00ff;
+    x = (x | (x << 4)) & 0x0f0f0f0f;
+    x = (x | (x << 2)) & 0x33333333;
+    x = (x | (x << 1)) & 0x55555555;
+    return x;
+}
+
+// morton (z-order) code for a texel within a face, so that texels near
+// each other in uv space stay near each other in linear memory
+uint morton2d(uint2 xy)
+{
+    return _morton_part1by1(xy.x) | (_morton_part1by1(xy.y) << 1);
+}
+
 [Differentiable]
 float luminance(float3 rgb)
 {

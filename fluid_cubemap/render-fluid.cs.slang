@@ -9,6 +9,7 @@ uniform float3   camera_pos;
 uniform uint     render_mode;
 uniform uint2    resolution;
 uniform float2   mouse_pos;
+uniform uint     mip_level;
 
 RWTexture2D<float4> image;
 
@@ -51,7 +52,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
         {
             case RenderMode::Smoke:
             {
-                float smoke = fluid.sample_smoke(pos);
+                float smoke = fluid.sample_smoke(pos, mip_level);
                 c.rgb = saturate(float3(1 - exp(smoke), 1 - exp(-smoke), 0.1));
                 break;
             }

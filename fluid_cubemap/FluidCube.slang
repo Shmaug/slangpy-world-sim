@@ -34,9 +34,15 @@ struct CubeMapTangentFrame
     }
 }
 
-uint2 cube_to_2d(uint3 texel, uint resolution)
+// requires resolution (and thus every mip_res) to be a power of two, so
+// morton2d(x, y) for x, y < mip_res always lands in [0, mip_res * mip_res)
+uint flatten_cube_texel(uint3 texel, uint resolution, uint mip = 0)
 {
-    return uint2(texel.xy + uint2(texel.z * resolution, 0));
+    uint offset = 0;
+    for (uint i = 0; i < mip; i++)
+        offset += (resolution >> i) * (resolution >> i) * 6;
+    uint mip_res = resolution >> mip;
+    return offset + morton2d(texel.xy) + texel.z * mip_res * mip_res;
 }
 
 // texel index of `cell` offset by one texel along the face's u/v axes,
@@ -58,16 +64,14 @@ uint3 cube_neighbor_texel(uint3 cell, int2 offset, uint resolution)
     return uint3(wrapped, uint(uvw.z));
 }
 
-float sample_cube(Texture2D<float> cubemap, float3 texel, uint mip)
+float sample_cube(StructuredBuffer<float> cubemap, uint resolution, float3 texel, uint mip)
 {
-    uint w, resolution, mips;
-    cubemap.GetDimensions(0, w, resolution, mips);
-    resolution >>= mip;
+    uint mip_res = resolution >> mip;
 
     // home texel (same as nearest-sample lookup) plus the fractional
     // offset of `uvw` from its center, in texel units
-    int2 home = clamp(int2(texel.xy * resolution), 0, int(resolution) - 1);
-    float2 frac_uv = texel.xy * resolution - float2(home);
+    int2 home = clamp(int2(texel.xy * mip_res), 0, int(mip_res) - 1);
+    float2 frac_uv = texel.xy * mip_res - float2(home);
 
     // the four texels to blend are `home` and its neighbors toward
     // whichever side of the texel center `texel` falls on; `off` picks
@@ -77,10 +81,10 @@ float sample_cube(Texture2D<float> cubemap, float3 texel, uint mip)
     float2 frac = frac_uv - 0.5 - float2(off);
 
     uint3 home_cell = uint3(uint2(home), uint(texel.z));
-    float s00 = cubemap.Load(int3(cube_to_2d( cube_neighbor_texel(home_cell, off, resolution), resolution ), mip));
-    float s10 = cubemap.Load(int3(cube_to_2d( cube_neighbor_texel(home_cell, off + int2(1, 0), resolution), resolution ), mip));
-    float s01 = cubemap.Load(int3(cube_to_2d( cube_neighbor_texel(home_cell, off + int2(0, 1), resolution), resolution ), mip));
-    float s11 = cubemap.Load(int3(cube_to_2d( cube_neighbor_texel(home_cell, off + int2(1, 1), resolution), resolution ), mip));
+    float s00 = cubemap[flatten_cube_texel( cube_neighbor_texel(home_cell, off + int2(0, 0), mip_res), resolution, mip) ];
+    float s10 = cubemap[flatten_cube_texel( cube_neighbor_texel(home_cell, off + int2(1, 0), mip_res), resolution, mip) ];
+    float s01 = cubemap[flatten_cube_texel( cube_neighbor_texel(home_cell, off + int2(0, 1), mip_res), resolution, mip) ];
+    float s11 = cubemap[flatten_cube_texel( cube_neighbor_texel(home_cell, off + int2(1, 1), mip_res), resolution, mip) ];
 
     return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
 }
@@ -88,55 +92,38 @@ float sample_cube(Texture2D<float> cubemap, float3 texel, uint mip)
 struct FluidCube
 {
     // tangent-space velocity
-    Texture2D<float2>   _velocity;
-    RWTexture2D<float2> _velocity_rw;
+    StructuredBuffer<float2>   _velocity;
+    RWStructuredBuffer<float2> _velocity_rw;
 
-    Texture2D<float>   _smoke;
-    RWTexture2D<float> _smoke_rw;
+    StructuredBuffer<float>   _smoke;
+    RWStructuredBuffer<float> _smoke_rw;
 
     uint resolution;
 
-    float2 load_velocity(uint3 texel)
+    uint flatten_index(uint3 texel, uint mip = 0)
     {
-        return _velocity[cube_to_2d(texel, resolution)];
+        return flatten_cube_texel(texel, resolution, mip);
     }
-    float2 load_velocity_rw(uint3 texel)
+    uint3 get_neighbor(uint3 texel, int2 offset, uint mip = 0)
     {
-        return _velocity_rw[cube_to_2d(texel, resolution)];
-    }
-    void store_velocity(uint3 texel, float2 newValue)
-    {
-        _velocity_rw[cube_to_2d(texel, resolution)] = newValue;
-    }
-
-    float load_smoke(uint3 texel)
-    {
-        return _smoke[cube_to_2d(texel, resolution)];
-    }
-    float load_smoke_rw(uint3 texel)
-    {
-        return _smoke_rw[cube_to_2d(texel, resolution)];
-    }
-    void store_smoke(uint3 texel, float newValue)
-    {
-        _smoke_rw[cube_to_2d(texel, resolution)] = newValue;
+        return cube_neighbor_texel(texel, offset, resolution >> mip);
     }
 
     // assumes dir is normalized
-    float sample_smoke(float3 dir)
+    float sample_smoke(float3 dir, uint mip = 0)
     {
-        return sample_cube(_smoke, dir_to_cube_uvw(dir), 0);
+        return sample_cube(_smoke, resolution, dir_to_cube_uvw(dir), mip);
     }
 
     float3 load_world_space_velocity(uint3 texel)
     {
         float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        return CubeMapTangentFrame(dir).to_world(load_velocity(texel));
+        return CubeMapTangentFrame(dir).to_world(_velocity[flatten_index(texel)]);
     }
     float3 load_world_space_velocity_rw(uint3 texel)
     {
         float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        return CubeMapTangentFrame(dir).to_world(load_velocity_rw(texel));
+        return CubeMapTangentFrame(dir).to_world(_velocity_rw[flatten_index(texel)]);
     }
 
     // assumes dir is normalized

@@ -1,8 +1,6 @@
 import FluidCube;
 
 uniform FluidCube fluid;
-Texture2D<float> sum_pre;
-Texture2D<float> sum_post;
 uniform uint mip_count;
 
 [shader("compute")]
@@ -16,8 +14,8 @@ void conserve_smoke(uint3 thread: SV_DispatchThreadID)
     float post = 0;
     for (uint i = 0; i < 6; i++)
     {
-        pre += sum_pre.Load(uint3(i, 0, mip_count-1));
-        post += sum_post.Load(uint3(i, 0, mip_count-1));
+        pre += fluid._smoke[fluid.flatten_index(uint3(0,0,i), mip_count - 1)];
+        post += fluid._smoke_rw[fluid.flatten_index(uint3(0,0,i), mip_count - 1)];
     }
-    fluid.store_smoke(thread, fluid.load_smoke_rw(thread) * (abs(post) > 0 ? pre / post : 0));
+    fluid._smoke_rw[fluid.flatten_index(thread)] *= (abs(post) > 0 ? pre / post : 0);
 }

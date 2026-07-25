@@ -47,6 +47,6 @@ void advect(uint3 thread: SV_DispatchThreadID)
     // rotate it into pos's tangent plane before storing it there
     float3 transported_velocity = sphere_parallel_transport(sampled_pos, pos, sampled_velocity);
 
-    fluid.store_smoke(thread, sampled_smoke);
-    fluid.store_velocity(thread, CubeMapTangentFrame(pos).to_local(transported_velocity));
+    fluid._smoke_rw[fluid.flatten_index(thread)] = sampled_smoke;
+    fluid._velocity_rw[fluid.flatten_index(thread)] = CubeMapTangentFrame(pos).to_local(transported_velocity);
 }

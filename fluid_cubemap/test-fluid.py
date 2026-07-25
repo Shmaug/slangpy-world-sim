@@ -60,6 +60,7 @@ class App:
         self.camera = Camera()
 
         self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Tangent", "Bitangent", "Texels" ])
+        self.render_mip = spy.ui.DragInt(window, "Mip Level", 0, min=0)
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -151,7 +152,8 @@ class App:
                     "render_mode": self.render_mode.value,
                     "resolution": spy.uint2(surface_texture.width, surface_texture.height),
                     "mouse_pos": mouse_pos,
-                    "image": self.render_texture
+                    "image": self.render_texture,
+                    "mip_level": min(max(self.render_mip.value, 0), self.simulator.mip_count()-1),
                 },
                 command_encoder
             )
