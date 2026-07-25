@@ -87,6 +87,32 @@ bool intersect_sphere(float3 origin, float3 direction, float radius, out float2 
     return t.y > 0;
 }
 
+// exact geodesic step: advances unit vector `pos` along the great circle
+// in the direction of tangent vector `v` (tangent to the sphere at `pos`)
+// by angle |v| -- the exponential map, as opposed to the cheaper but
+// approximate normalize(pos + v)
+[Differentiable]
+float3 sphere_exp_map(float3 pos, float3 v)
+{
+    float theta = length(v);
+    if (theta < 1e-8) return pos;
+    return pos * cos(theta) + (v / theta) * sin(theta);
+}
+
+// parallel-transports tangent vector `vec` (tangent to the sphere at
+// `from`) along the great-circle arc from `from` to `to`, returning the
+// corresponding tangent vector at `to`
+[Differentiable]
+float3 sphere_parallel_transport(float3 from, float3 to, float3 vec)
+{
+    float3 axis = cross(from, to);
+    float s = length(axis);
+    float c = dot(from, to);
+    if (s < 1e-8) return vec;
+    axis /= s;
+    return vec * c + cross(axis, vec) * s + axis * dot(axis, vec) * (1.0 - c);
+}
+
 [Differentiable]
 float3 uv_to_xyz(float2 uv) {
     return float3(

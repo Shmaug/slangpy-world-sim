@@ -140,8 +140,7 @@ class CubeFluidSimulator:
             dispatch(self.compute_divergence_kernel, pressure_project_vars())
 
             if self.multires_solve.value:
-                for mip in range(self.pressure_correction_tex[0].mip_count-1):
-                    dispatch(self.pressure_project_f2c_kernel, pressure_project_vars(mip+1))
+                command_encoder.generate_mips(self.divergence_tex)
 
                 for _ in range(self.solver_iterations.value):
                     # pre-smooth on the fine level
@@ -149,10 +148,12 @@ class CubeFluidSimulator:
                         dispatch(self.pressure_project_step_kernel, pressure_project_vars())
                         swap(self.pressure_correction_tex)
 
-                    # fine -> coarse via mipmapping
-                    command_encoder.generate_mips(self.pressure_correction_tex[0])
-                    for i in range(2, self.pressure_correction_tex[0].mip_count):
-                        mip = self.pressure_correction_tex[0].mip_count - i - 1
+                    # fine -> coarse
+                    for mip in range(self.pressure_correction_tex[0].mip_count-1):
+                        dispatch(self.pressure_project_f2c_kernel, pressure_project_vars(mip+1))
+
+                    # coarse -> fine
+                    for mip in range(self.pressure_correction_tex[0].mip_count-1, 2, -1):
                         # interpolate mip+1 -> mip
                         dispatch(self.pressure_project_c2f_kernel, pressure_project_vars(mip), mip=mip)
                         swap(self.pressure_correction_tex)
