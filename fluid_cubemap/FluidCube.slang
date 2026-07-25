@@ -109,6 +109,19 @@ struct FluidCube
         return cube_neighbor_texel(texel, offset, resolution >> mip);
     }
 
+    // great-circle (geodesic) distance in radians between the centers of
+    // two texels -- the cubemap's per-face plane parameterization isn't
+    // equal-area, so texels near a face's center subtend a much larger
+    // angle than texels near its edges/corners, and neighbor spacing must
+    // be weighted accordingly rather than assumed uniform
+    float neighbor_distance(uint3 texel, uint3 neighbor, uint mip = 0)
+    {
+        uint res = resolution >> mip;
+        float3 a = cube_uvw_to_dir(float3((float2(texel.xy) + 0.5) / res, texel.z));
+        float3 b = cube_uvw_to_dir(float3((float2(neighbor.xy) + 0.5) / res, neighbor.z));
+        return acos(clamp(dot(a, b), -1.0, 1.0));
+    }
+
     // assumes dir is normalized
     float sample_smoke(float3 dir, uint mip = 0)
     {

@@ -160,7 +160,7 @@ class CubeFluidSimulator:
             dispatch(self.emit_kernel, {
                 "fluid":        self.shader_vars(),
                 "target_pos":   spy.float3(0,0,1),
-                "target_angle": np.radians(1),
+                "target_angle": np.radians(3),
                 "target_dir":   spy.float3(0,.1,0),
             })
 
