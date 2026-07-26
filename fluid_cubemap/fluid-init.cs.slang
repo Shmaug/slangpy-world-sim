@@ -1,7 +1,8 @@
 import Math;
-import FluidCube;
+import SphericalField;
 
-uniform FluidCube fluid;
+uniform SphericalScalarField smoke;
+uniform SphericalVelocityField velocity;
 
 uniform float3 target_pos;
 uniform float  target_angle;
@@ -11,10 +12,10 @@ uniform float3 target_dir;
 [numthreads(8, 8, 1)]
 void emit_plume(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy >= fluid.resolution) || thread.z >= 6)
+    if (any(thread.xy >= velocity.resolution) || thread.z >= 6)
         return;
 
-    float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / fluid.resolution, thread.z));
+    float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / velocity.resolution, thread.z));
 
     // Distance from emission point
     float angle = acos(clamp(dot(target_pos, pos), -1.0, 1.0));
@@ -25,7 +26,7 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
         float normalized_dist = angle / (target_angle * 2.0);
         float gaussian = exp(-normalized_dist * normalized_dist * 4.0);
 
-        fluid._smoke_rw[fluid.flatten_index(thread)] += gaussian;
-        fluid._velocity_rw[fluid.flatten_index(thread)] += gaussian * CubeMapTangentFrame(pos).to_local(target_dir);
+        smoke.store(thread, smoke.load(thread) + gaussian);
+        velocity.store(thread, velocity.load(thread) + gaussian * CubeMapTangentFrame(pos).to_local(target_dir));
     }
 }

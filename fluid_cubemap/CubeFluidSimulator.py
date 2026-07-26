@@ -15,11 +15,10 @@ class CubeFluidSimulator:
         self.advect_kernel = create_kernel("fluid-advection.cs.slang", "advect")
         self.generate_mip_kernel = create_kernel("fluid-mipgen.cs.slang", "generate_mip")
         self.conserve_smoke_kernel = create_kernel("fluid-conservation.cs.slang", "conserve_smoke")
-        self.compute_divergence_kernel       = create_kernel("fluid-pressure-project.cs.slang", "compute_divergence")
-        self.pressure_project_step_kernel    = create_kernel("fluid-pressure-project.cs.slang", "step")
-        self.pressure_project_f2c_kernel = create_kernel("fluid-pressure-project.cs.slang", "fine_to_coarse")
-        self.pressure_project_c2f_kernel = create_kernel("fluid-pressure-project.cs.slang", "coarse_to_fine")
-        self.pressure_project_apply_kernel   = create_kernel("fluid-pressure-project.cs.slang", "apply")
+        self.compute_divergence_kernel        = create_kernel("fluid-pressure-project.cs.slang", "compute_divergence")
+        self.pressure_project_step_kernel     = create_kernel("fluid-pressure-project.cs.slang", "step")
+        self.pressure_project_resample_kernel = create_kernel("fluid-pressure-project.cs.slang", "resample")
+        self.pressure_project_apply_kernel    = create_kernel("fluid-pressure-project.cs.slang", "apply")
 
         self.reset = True
         self.step_once = False
@@ -95,15 +94,18 @@ class CubeFluidSimulator:
     def mip_count(self):
         return 1 + int(spy.math.ceil(spy.math.log2(self.resolution)))
 
-    def shader_vars(self):
+    def smoke_field(self, pingpong=0):
         return {
-            "_smoke": self.smoke_buf[0],
-            "_smoke_rw": self.smoke_buf[1],
-            "_velocity": self.velocity_buf[0],
-            "_velocity_rw": self.velocity_buf[1],
+            "data": self.smoke_buf[pingpong],
             "resolution": self.resolution,
         }
-
+    
+    def velocity_field(self, pingpong=0):
+        return {
+            "data": self.velocity_buf[pingpong],
+            "resolution": self.resolution,
+        }
+    
     def step(self, command_encoder:spy.CommandEncoder, dt):
         def swap(vars):
             vars[0], vars[1] = vars[1], vars[0]
@@ -117,14 +119,13 @@ class CubeFluidSimulator:
             return
         self.step_once = False
 
-        def pressure_project_vars(mip = 0):
+        def pressure_project_vars(dst_mip = 0, src_mip = 0):
             return {
-                "fluid": self.shader_vars(),
-                "divergence": self.divergence_buf,
-                "divergence_rw": self.divergence_buf,
-                "pressure_correction": self.pressure_correction_buf[0],
-                "pressure_correction_rw": self.pressure_correction_buf[1],
-                "mip_level": mip,
+                "velocity": self.velocity_field(1),
+                "divergence": { "data": self.divergence_buf, "resolution": self.resolution },
+                "pressure_correction": [ { "data": self.pressure_correction_buf[i], "resolution": self.resolution } for i in range(2) ],
+                "dst_mip_level": dst_mip,
+                "src_mip_level": src_mip,
             }
         
         def dispatch(kernel, vars, mip = 0):
@@ -134,15 +135,19 @@ class CubeFluidSimulator:
         def generate_mips(buf):
             for mip in range(1, self.mip_count()):
                 dispatch(self.generate_mip_kernel, {
-                    "data": buf,
-                    "resolution": self.resolution,
+                    "field": {
+                        "data": buf,
+                        "resolution": self.resolution,
+                    },
                     "dst_mip": mip,
                 }, mip)
 
-
         # advect velocity and smoke
         dispatch(self.advect_kernel, {
-            "fluid": self.shader_vars(),
+            "smoke": self.smoke_field(),
+            "velocity": self.velocity_field(),
+            "smoke_out": self.smoke_field(1),
+            "velocity_out": self.velocity_field(1),
             "dt": self.dt.value,
         })
 
@@ -151,14 +156,16 @@ class CubeFluidSimulator:
             generate_mips(self.smoke_buf[0])
             generate_mips(self.smoke_buf[1])
             dispatch(self.conserve_smoke_kernel, {
-                "fluid": self.shader_vars(),
+                "fluid_pre": self.smoke_field(),
+                "fluid_post": self.smoke_field(1),
                 "mip_count": self.mip_count(),
             })
 
         # handle emitters
         if self.emit_plume.value:
             dispatch(self.emit_kernel, {
-                "fluid":        self.shader_vars(),
+                "smoke":        self.smoke_field(1),
+                "velocity":     self.velocity_field(1),
                 "target_pos":   spy.float3(0,0,1),
                 "target_angle": np.radians(3),
                 "target_dir":   spy.float3(0,.1,0),
@@ -177,13 +184,13 @@ class CubeFluidSimulator:
                         swap(self.pressure_correction_buf)
 
                     # fine -> coarse
-                    for mip in range(self.mip_count()-1):
-                        dispatch(self.pressure_project_f2c_kernel, pressure_project_vars(mip+1))
+                    for mip in range(1,self.mip_count()):
+                        dispatch(self.pressure_project_resample_kernel, pressure_project_vars(mip, mip-1))
 
                     # coarse -> fine
                     for mip in range(self.mip_count()-1, 2, -1):
                         # interpolate mip+1 -> mip
-                        dispatch(self.pressure_project_c2f_kernel, pressure_project_vars(mip), mip=mip)
+                        dispatch(self.pressure_project_resample_kernel, pressure_project_vars(mip, mip+1), mip=mip)
                         swap(self.pressure_correction_buf)
                         # solve on mip
                         dispatch(self.pressure_project_step_kernel, pressure_project_vars(mip), mip=mip)
@@ -194,9 +201,6 @@ class CubeFluidSimulator:
                     swap(self.pressure_correction_buf)
 
             dispatch(self.pressure_project_apply_kernel, pressure_project_vars())
-
-        swap(self.smoke_buf)
-        swap(self.velocity_buf)
 
         # show some stats
         
@@ -209,11 +213,14 @@ class CubeFluidSimulator:
         )
         self.divergence_ui.text = f"Divergence: {self.divergence_readback.to_numpy().view(np.float32).mean() * (6 * self.resolution * self.resolution):.3f}"
 
-        generate_mips(self.smoke_buf[0])
+        generate_mips(self.smoke_buf[1])
         command_encoder.copy_buffer(
             self.smoke_readback, 0,
-            self.smoke_buf[0], 4 * sum(6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
+            self.smoke_buf[1], 4 * sum(6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
             6 * 4
         )
         self.smoke_amount_ui.text = f"Smoke: {self.smoke_readback.to_numpy().view(np.float32).mean():.3f}"
 
+
+        swap(self.smoke_buf)
+        swap(self.velocity_buf)

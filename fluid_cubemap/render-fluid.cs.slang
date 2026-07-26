@@ -1,7 +1,8 @@
 import Math;
-import FluidCube;
+import SphericalField;
 
-uniform FluidCube fluid;
+uniform SphericalScalarField smoke;
+uniform SphericalVelocityField velocity;
 
 uniform float4x4 view_projection;
 uniform float4x4 inv_view_projection;
@@ -52,13 +53,13 @@ void render(uint2 pixel: SV_DispatchThreadID)
         {
             case RenderMode::Smoke:
             {
-                float smoke = fluid.sample_smoke(pos, mip_level);
+                float smoke = smoke.sample(pos, mip_level);
                 c.rgb = saturate(float3(1 - exp(smoke), 1 - exp(-smoke), 0.1));
                 break;
             }
             case RenderMode::Velocity:
             {
-                float3 vel = fluid.sample_velocity(pos);
+                float3 vel = velocity.sample(pos);
                 c.rgb = 5 * vel + 0.5;
                 break;
             }
@@ -75,7 +76,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
             case RenderMode::Texels:
             {
                 float3 uvw = dir_to_cube_uvw(pos);
-                uint3 texel = uint3(uint2(uvw.xy * fluid.resolution), uint(uvw.z));
+                uint3 texel = uint3(uint2(uvw.xy * smoke.resolution), uint(uvw.z));
 
                 c.rgb = float3(uint3(pcg(texel.x + pcg(texel.y)), pcg(texel.y + pcg(texel.x)), 0) % 255) / 255;
                 c.rgb = lerp(c.rgb, 0.5, 0.75);
@@ -86,7 +87,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
                 {
                     float3 mouse_pos = camera_pos + mouse_ray_dir * mouse_t.x;
                     float3 mouse_uvw = dir_to_cube_uvw(mouse_pos);
-                    uint3 mouse_texel = uint3(uint2(mouse_uvw.xy * fluid.resolution), uint(mouse_uvw.z));
+                    uint3 mouse_texel = uint3(uint2(mouse_uvw.xy * smoke.resolution), uint(mouse_uvw.z));
                     if (all(mouse_texel == texel))
                     {
                         c.rgb = 1;
@@ -100,7 +101,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
                     };
                     for (uint i = 0; i < 4; i++)
                     {
-                        uint3 neighbor_texel = cube_neighbor_texel(texel, neighbors[i], fluid.resolution);
+                        uint3 neighbor_texel = cube_neighbor_texel(texel, neighbors[i], smoke.resolution);
                         if (all(mouse_texel == neighbor_texel))
                         {
                             c.rgb = float3(1, 0, 0);

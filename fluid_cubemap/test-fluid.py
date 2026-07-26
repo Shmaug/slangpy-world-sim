@@ -145,7 +145,8 @@ class App:
             self.render_kernel.dispatch(
                 [ surface_texture.width, surface_texture.height, 1 ],
                 {
-                    "fluid": self.simulator.shader_vars(),
+                    "smoke": self.simulator.smoke_field(),
+                    "velocity": self.simulator.velocity_field(),
                     "view_projection": view_projection,
                     "inv_view_projection": spy.math.inverse(view_projection),
                     "camera_pos": self.camera.position,

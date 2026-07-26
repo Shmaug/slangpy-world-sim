@@ -1,7 +1,12 @@
 import Math;
-import FluidCube;
+import SphericalField;
 
-uniform FluidCube fluid;
+uniform SphericalScalarField   smoke;
+uniform SphericalVelocityField velocity;
+
+uniform SphericalScalarField   smoke_out;
+uniform SphericalVelocityField velocity_out;
+
 uniform float dt;
 
 float3 integrate_velocity(float3 pos)
@@ -14,16 +19,16 @@ float3 integrate_velocity(float3 pos)
     // sampled at three different points, so treating them as if they lived
     // in the same tangent space as k1 would reintroduce the same
     // flat-vector-space bug this is meant to fix.
-    float3 k1 = fluid.sample_velocity(pos);
+    float3 k1 = velocity.sample(pos);
 
     float3 p2 = sphere_exp_map(pos, k1 * dt / 2.0);
-    float3 k2 = sphere_parallel_transport(p2, pos, fluid.sample_velocity(p2));
+    float3 k2 = sphere_parallel_transport(p2, pos, velocity.sample(p2));
 
     float3 p3 = sphere_exp_map(pos, k2 * dt / 2.0);
-    float3 k3 = sphere_parallel_transport(p3, pos, fluid.sample_velocity(p3));
+    float3 k3 = sphere_parallel_transport(p3, pos, velocity.sample(p3));
 
     float3 p4 = sphere_exp_map(pos, k3 * dt);
-    float3 k4 = sphere_parallel_transport(p4, pos, fluid.sample_velocity(p4));
+    float3 k4 = sphere_parallel_transport(p4, pos, velocity.sample(p4));
 
     float3 d = (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4);
 
@@ -34,19 +39,19 @@ float3 integrate_velocity(float3 pos)
 [numthreads(8, 8, 1)]
 void advect(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy > fluid.resolution) || thread.z >= 6)
+    if (any(thread.xy > velocity.resolution) || thread.z >= 6)
         return;
 
-    float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / fluid.resolution, thread.z));
+    float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / velocity.resolution, thread.z));
     float3 sampled_pos = integrate_velocity(pos);
 
-    float sampled_smoke = fluid.sample_smoke(sampled_pos);
-    float3 sampled_velocity = fluid.sample_velocity(sampled_pos);
+    float sampled_smoke = smoke.sample(sampled_pos);
+    float3 sampled_velocity = velocity.sample(sampled_pos);
 
     // sampled_velocity is tangent to the sphere at sampled_pos, not pos --
     // rotate it into pos's tangent plane before storing it there
     float3 transported_velocity = sphere_parallel_transport(sampled_pos, pos, sampled_velocity);
 
-    fluid._smoke_rw[fluid.flatten_index(thread)] = sampled_smoke;
-    fluid._velocity_rw[fluid.flatten_index(thread)] = CubeMapTangentFrame(pos).to_local(transported_velocity);
+    smoke_out.store(thread, sampled_smoke);
+    velocity_out.store(thread, CubeMapTangentFrame(pos).to_local(transported_velocity));
 }

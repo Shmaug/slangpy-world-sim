@@ -106,32 +106,6 @@ bool intersect_sphere(float3 origin, float3 direction, float radius, out float2 
     return t.y > 0;
 }
 
-// exact geodesic step: advances unit vector `pos` along the great circle
-// in the direction of tangent vector `v` (tangent to the sphere at `pos`)
-// by angle |v| -- the exponential map, as opposed to the cheaper but
-// approximate normalize(pos + v)
-[Differentiable]
-float3 sphere_exp_map(float3 pos, float3 v)
-{
-    float theta = length(v);
-    if (theta < 1e-8) return pos;
-    return pos * cos(theta) + (v / theta) * sin(theta);
-}
-
-// parallel-transports tangent vector `vec` (tangent to the sphere at
-// `from`) along the great-circle arc from `from` to `to`, returning the
-// corresponding tangent vector at `to`
-[Differentiable]
-float3 sphere_parallel_transport(float3 from, float3 to, float3 vec)
-{
-    float3 axis = cross(from, to);
-    float s = length(axis);
-    float c = dot(from, to);
-    if (s < 1e-8) return vec;
-    axis /= s;
-    return vec * c + cross(axis, vec) * s + axis * dot(axis, vec) * (1.0 - c);
-}
-
 [Differentiable]
 float3 uv_to_xyz(float2 uv) {
     return float3(
@@ -147,55 +121,6 @@ float2 xyz_to_uv(float3 xyz)
         -atan2(xyz.x, -xyz.z) * M_1_2PI + 0.5,
         acos(xyz.y) * M_1_PI
     );
-}
-
-
-// cube face order: 0:+X 1:-X 2:+Y 3:-Y 4:+Z 5:-Z
-[Differentiable]
-float3 dir_to_cube_uvw(float3 dir)
-{
-    float3 absDir = abs(dir);
-    float maxAxis, uc, vc;
-    int face;
-
-    if (absDir.x >= absDir.y && absDir.x >= absDir.z)
-    {
-        maxAxis = absDir.x;
-        if (dir.x > 0) { uc = -dir.z; vc = dir.y; face = 0; }
-        else           { uc =  dir.z; vc = dir.y; face = 1; }
-    }
-    else if (absDir.y >= absDir.z)
-    {
-        maxAxis = absDir.y;
-        if (dir.y > 0) { uc = dir.x; vc = -dir.z; face = 2; }
-        else           { uc = dir.x; vc =  dir.z; face = 3; }
-    }
-    else
-    {
-        maxAxis = absDir.z;
-        if (dir.z > 0) { uc =  dir.x; vc = dir.y; face = 4; }
-        else           { uc = -dir.x; vc = dir.y; face = 5; }
-    }
-
-    float2 uv = float2(uc, vc) / maxAxis * 0.5 + 0.5;
-    return float3(uv, face);
-}
-
-[Differentiable]
-float3 cube_uvw_to_dir(float3 uvw)
-{
-    float2 sc = uvw.xy * 2.0 - 1.0;
-    int face = int(uvw.z);
-
-    float3 dir;
-    if      (face == 0) dir = float3( 1.0,  sc.y, -sc.x);
-    else if (face == 1) dir = float3(-1.0,  sc.y,  sc.x);
-    else if (face == 2) dir = float3(sc.x,  1.0,  -sc.y);
-    else if (face == 3) dir = float3(sc.x, -1.0,   sc.y);
-    else if (face == 4) dir = float3(sc.x,  sc.y,   1.0);
-    else                dir = float3(-sc.x, sc.y,  -1.0);
-
-    return normalize(dir);
 }
 
 // xxhash https://github.com/Cyan4973/xxHash
