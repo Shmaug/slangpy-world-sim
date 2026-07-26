@@ -1,5 +1,6 @@
 import Math;
 import SphericalField;
+import RNG;
 
 uniform SphericalScalarField smoke;
 uniform SphericalVelocityField velocity;
@@ -11,7 +12,6 @@ uniform uint     render_mode;
 uniform uint2    resolution;
 uniform float2   mouse_pos;
 uniform uint     mip_level;
-uniform uint     vertical_layer;
 
 RWTexture2D<float4> image;
 
@@ -112,12 +112,15 @@ void render(uint2 pixel: SV_DispatchThreadID)
             if (ray_t.x > 0)
                 atmosphere_t.y = min(ray_t.x, atmosphere_t.y);
 
-            uint N = 32;
+            RNG rng = RNG(asuint(atmosphere_t.y) + pcg(asuint(atmosphere_t.x)));
+            float t_offset = rng.nextFloat();
+
+            uint N = 128;
             float total_d = 0;
             float scale = (atmosphere_t.y - atmosphere_t.x) / float(N);
             for (uint i = 0; i < N; i++)
             {
-                float3 pos = camera_pos + ray_dir * lerp(atmosphere_t.x, atmosphere_t.y, i / float(N - 1));
+                float3 pos = camera_pos + ray_dir * lerp(atmosphere_t.x, atmosphere_t.y, i / float(N - 1) + t_offset);
                 float h = length(pos);
                 pos /= h;
                 float v = (h - 1) / (smoke.thickness / smoke.vertical_resolution);
@@ -127,13 +130,13 @@ void render(uint2 pixel: SV_DispatchThreadID)
                 {
                     float s = smoke.sample(pos, mip_level, v);
                     rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
-                    d = s;
+                    d = 1 + s;
                 }
                 else
                 {
                     float3 v = velocity.sample(pos, v);
                     rgb = 5 * v + 0.5;
-                    d = length(v);
+                    d = 1 + length(v);
                 }
                 d *= scale;
                 c.rgb += rgb * exp(-total_d) * d;
