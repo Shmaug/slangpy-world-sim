@@ -159,8 +159,16 @@ struct SphericalScalarField
 {
     RWStructuredBuffer<float> data;
     float thickness; // height above 1 of the simulation
+    float scale_height; // scale height where average density is found
     uint resolution;
     uint vertical_resolution;
+
+    // atmosphere density at physical radius `r` (in [1, 1+thickness]),
+    // normalized to 1 at the surface r=1
+    float sample_density(float r)
+    {
+        return exp(-(r - 1.0) / scale_height);
+    }
 
     uint flatten_index(uint3 texel, uint mip = 0)
     {
@@ -187,7 +195,7 @@ struct SphericalScalarField
         return cube_neighbor_texel(texel, offset, resolution >> mip);
     }
 
-    float sample_at_layer(float3 dir, uint mip, uint vertical_layer)
+    float sample_layer(float3 dir, uint mip, uint vertical_layer)
     {
         uint mip_res = resolution >> mip;
         float3 cube_uvw = dir_to_cube_uvw(dir);
@@ -213,16 +221,22 @@ struct SphericalScalarField
         return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
     }
 
-    // as sample_at_layer, but blends between the two integer layers
-    // straddling `vertical_layer` -- lets a fractional radial position
-    // (as produced by 3D advection) sample smoothly across layers
-    float sample(float3 dir, uint mip = 0, float vertical_layer = 0)
+    float sample(float3 dir, float vertical_layer, uint mip)
     {
         float layer_clamped = clamp(vertical_layer, 0, float(vertical_resolution - 1));
         uint layer_lo = uint(floor(layer_clamped));
         uint layer_hi = min(layer_lo + 1, vertical_resolution - 1);
         float t = layer_clamped - float(layer_lo);
-        return lerp(sample_at_layer(dir, mip, layer_lo), sample_at_layer(dir, mip, layer_hi), t);
+        return lerp(sample_layer(dir, mip, layer_lo), sample_layer(dir, mip, layer_hi), t);
+    }
+
+    // 3d sampling, vertical_layer extracted from length(pos)
+    float sample(float3 pos, uint mip)
+    {
+        float h = length(pos);
+        float3 dir = pos / h;
+        float vertical_layer = vertical_resolution * ((h - 1) / thickness);
+        return sample(dir, vertical_layer, mip);
     }
 }
 
@@ -233,8 +247,16 @@ struct SphericalVelocityField
     // distance since the sphere has radius 1)
     RWStructuredBuffer<float3> data;
     float thickness; // height above 1 of the simulation
+    float scale_height; // scale height where average density is found
     uint resolution;
     uint vertical_resolution;
+
+    // atmosphere density at physical radius `r` (in [1, 1+thickness]),
+    // normalized to 1 at the surface r=1
+    float sample_density(float r)
+    {
+        return exp(-max(0, r - 1.0) / scale_height);
+    }
 
     uint flatten_index(uint3 texel, uint mip = 0)
     {
@@ -261,9 +283,9 @@ struct SphericalVelocityField
         return cube_neighbor_texel(texel, offset, resolution);
     }
 
-    float3 to_local(float3 pos, float3 vel)
+    float3 to_local(float3 dir, float3 vel)
     {
-        return CubeMapTangentFrame(pos).to_local3(vel);
+        return CubeMapTangentFrame(dir).to_local3(vel);
     }
 
     float3 load_world_space(uint3 texel)
@@ -278,7 +300,7 @@ struct SphericalVelocityField
         return sphere_parallel_transport(dir, dst_dir, vel);
     }
 
-    float3 sample_at_layer(float3 dir, uint vertical_layer)
+    float3 sample_layer(float3 dir, uint vertical_layer)
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
 
@@ -304,16 +326,21 @@ struct SphericalVelocityField
         return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
     }
 
-    // as sample_at_layer, but blends between the two integer layers
-    // straddling `vertical_layer`; no extra transport is needed between
-    // them since both layers share the same (dir) angular footprint and
-    // therefore the same tangent frame
-    float3 sample(float3 dir, float vertical_layer = 0)
+    float3 sample(float3 dir, float vertical_layer)
     {
         float layer_clamped = clamp(vertical_layer, 0, float(vertical_resolution - 1));
         uint layer_lo = uint(floor(layer_clamped));
         uint layer_hi = min(layer_lo + 1, vertical_resolution - 1);
         float t = layer_clamped - float(layer_lo);
-        return lerp(sample_at_layer(dir, layer_lo), sample_at_layer(dir, layer_hi), t);
+        return lerp(sample_layer(dir, layer_lo), sample_layer(dir, layer_hi), t);
+    }
+
+    // 3d sampling, vertical_layer extracted from length(pos)
+    float3 sample(float3 pos)
+    {
+        float h = length(pos);
+        float3 dir = pos / h;
+        float vertical_layer = vertical_resolution * ((h - 1) / thickness);
+        return sample(dir, vertical_layer);
     }
 }

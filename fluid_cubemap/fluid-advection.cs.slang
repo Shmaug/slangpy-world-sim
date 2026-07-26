@@ -87,7 +87,7 @@ void advect(uint3 thread: SV_DispatchThreadID)
     integrate_velocity(pos, r, sampled_pos, sampled_r);
     float sampled_layer = layer_of_radius(sampled_r);
 
-    float sampled_smoke = smoke.sample(sampled_pos, 0, sampled_layer);
+    float sampled_smoke = smoke.sample(sampled_pos, sampled_layer, 0);
     float3 sampled_velocity = velocity.sample(sampled_pos, sampled_layer);
 
     // sampled_velocity is expressed at sampled_pos, not pos -- rotate it

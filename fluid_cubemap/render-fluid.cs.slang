@@ -52,6 +52,24 @@ void render(uint2 pixel: SV_DispatchThreadID)
 
         switch ((RenderMode)render_mode)
         {
+            case RenderMode::Smoke:
+            {
+                if (smoke.vertical_resolution == 1)
+                {
+                    float s = smoke.sample_layer(pos, mip_level, 0);
+                    c.rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
+                }
+                break;
+            }
+            case RenderMode::Velocity:
+            {
+                if (smoke.vertical_resolution == 1)
+                {
+                    float3 v = velocity.sample_layer(pos, 0);
+                    c.rgb = 5 * v + 0.5;
+                }
+                break;
+            }
             case RenderMode::Tangent:
             {
                 c.rgb = frame.t * 0.5 + 0.5;
@@ -103,44 +121,53 @@ void render(uint2 pixel: SV_DispatchThreadID)
         }
     }
 
-    float2 atmosphere_t;
-    if (intersect_sphere(camera_pos, ray_dir, 1 + smoke.thickness, atmosphere_t))
+    if (smoke.vertical_resolution > 1)
     {
-        if ((RenderMode)render_mode == RenderMode::Smoke || (RenderMode)render_mode == RenderMode::Velocity)
+        float2 atmosphere_t;
+        if (intersect_sphere(camera_pos, ray_dir, 1 + smoke.thickness, atmosphere_t))
         {
-            atmosphere_t.x = max(0, atmosphere_t.x);
-            if (ray_t.x > 0)
-                atmosphere_t.y = min(ray_t.x, atmosphere_t.y);
-
-            RNG rng = RNG(asuint(atmosphere_t.y) + pcg(asuint(atmosphere_t.x)));
-            float t_offset = rng.nextFloat();
-
-            uint N = 128;
-            float total_d = 0;
-            float scale = (atmosphere_t.y - atmosphere_t.x) / float(N);
-            for (uint i = 0; i < N; i++)
+            if ((RenderMode)render_mode == RenderMode::Smoke || (RenderMode)render_mode == RenderMode::Velocity)
             {
-                float3 pos = camera_pos + ray_dir * lerp(atmosphere_t.x, atmosphere_t.y, i / float(N - 1) + t_offset);
-                float h = length(pos);
-                pos /= h;
-                float v = (h - 1) / (smoke.thickness / smoke.vertical_resolution);
-                float3 rgb;
-                float d;
-                if ((RenderMode)render_mode == RenderMode::Smoke)
+                atmosphere_t.x = max(0, atmosphere_t.x);
+                if (ray_t.x > 0)
+                    atmosphere_t.y = min(ray_t.x, atmosphere_t.y);
+
+                RNG rng = RNG(asuint(atmosphere_t.y) + pcg(asuint(atmosphere_t.x)));
+
+                uint N = 64;
+                float optical_depth = 0;
+                float t = atmosphere_t.x;
+                for (uint i = 0; i < N; i++)
                 {
-                    float s = smoke.sample(pos, mip_level, v);
-                    rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
-                    d = 1 + s;
+                    float3 pos = camera_pos + ray_dir * t;
+                    if (t > atmosphere_t.y)
+                        break;
+
+                    float3 color;
+                    float density;
+                    if ((RenderMode)render_mode == RenderMode::Smoke)
+                    {
+                        float s = smoke.sample(pos, mip_level);
+                        color = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
+                        density = s;
+                    }
+                    else
+                    {
+                        float3 v = velocity.sample(pos);
+                        color = 5 * v + 0.5;
+                        density = length(v);
+                    }
+
+                    density = 1 + 5*density;
+                    density *= velocity.sample_density(length(pos)) / velocity.thickness;
+
+                    float step = (rng.nextFloat() + 5 * exp(-density)) * (atmosphere_t.y - atmosphere_t.x) / float(N);
+
+                    c.rgb += 3 * color * density * step * exp(-optical_depth);
+                    optical_depth += step * density;
+
+                    t += step;
                 }
-                else
-                {
-                    float3 v = velocity.sample(pos, v);
-                    rgb = 5 * v + 0.5;
-                    d = 1 + length(v);
-                }
-                d *= scale;
-                c.rgb += rgb * exp(-total_d) * d;
-                total_d += d;
             }
         }
     }

@@ -137,7 +137,7 @@ class WorldRenderer:
 class App:
     def __init__(self):
         super().__init__()
-        self.device = spy.create_device(include_paths=[os.path.abspath("."), os.path.abspath("src")])
+        self.device = spy.create_device(include_paths=[os.path.dirname(__file__), os.path.join(os.path.dirname(__file__), os.path.pardir)])
         self.window = spy.Window(width=1400, height=(1400*9)//16, title="App", resizable=True)
         self.surface = self.device.create_surface(self.window)
         self.surface.configure({

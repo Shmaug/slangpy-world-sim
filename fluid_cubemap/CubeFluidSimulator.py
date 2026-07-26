@@ -87,7 +87,8 @@ class CubeFluidSimulator:
         self.reset_button = spy.ui.Button(widget, "Reset", callback=reset_cb)
         self.resolution_ui = spy.ui.ComboBox(widget, "Resolution", int(spy.math.ceil(spy.math.log2(self.resolution))), items=[ str(1 << i) for i in range(13) ], callback=res_cb)
         self.vertical_resolution_ui = spy.ui.ComboBox(widget, "Vertical resolution", int(spy.math.ceil(spy.math.log2(self.vertical_resolution))), items=[ str(1 << i) for i in range(4) ], callback=res_cb)
-        self.thickness = spy.ui.DragFloat(widget, "Thickness", 0.1, min=0.001)
+        self.thickness = spy.ui.DragFloat(widget, "Thickness", 0.25, min=1e-4, speed = 0.01)
+        self.atmosphere_scale_height = spy.ui.DragFloat(widget, "Atmosphere scale height", 1.0, min=1e-4, speed = 0.01)
         self.solver_iterations = spy.ui.DragInt(widget, "Solver iterations", value=10)
         self.solver_fine_iterations = spy.ui.DragInt(widget, "Solver fine iterations", value=4)
         self.multires_solve = spy.ui.CheckBox(widget, "Multiresolution solver", value=True)
@@ -105,6 +106,7 @@ class CubeFluidSimulator:
         return {
             "data": self.smoke_buf[pingpong],
             "thickness": self.thickness.value,
+            "scale_height": self.atmosphere_scale_height.value,
             "resolution": self.resolution,
             "vertical_resolution": self.vertical_resolution
         }
@@ -113,6 +115,7 @@ class CubeFluidSimulator:
         return {
             "data": self.velocity_buf[pingpong],
             "thickness": self.thickness.value,
+            "scale_height": self.atmosphere_scale_height.value,
             "resolution": self.resolution,
             "vertical_resolution": self.vertical_resolution
         }
@@ -130,11 +133,14 @@ class CubeFluidSimulator:
             return
         self.step_once = False
 
+        self.atmosphere_scale_height.value = max(1e-4, self.atmosphere_scale_height.value)
+        self.thickness.value = max(1e-4, self.thickness.value)
+
         def pressure_project_vars(dst_mip = 0, src_mip = 0):
             return {
                 "velocity": self.velocity_field(1),
-                "divergence": { "data": self.divergence_buf, "resolution": self.resolution, "vertical_resolution": self.vertical_resolution },
-                "pressure_correction": [ { "data": self.pressure_correction_buf[i], "resolution": self.resolution, "vertical_resolution": self.vertical_resolution } for i in range(2) ],
+                "divergence": self.smoke_field() | { "data": self.divergence_buf },
+                "pressure_correction": [ self.smoke_field() | { "data": self.pressure_correction_buf[i] } for i in range(2) ],
                 "dst_mip_level": dst_mip,
                 "src_mip_level": src_mip,
             }
@@ -146,11 +152,7 @@ class CubeFluidSimulator:
         def generate_mips(buf):
             for mip in range(1, self.mip_count()):
                 dispatch(self.generate_mip_kernel, {
-                    "field": {
-                        "data": buf,
-                        "resolution": self.resolution,
-                        "vertical_resolution": self.vertical_resolution
-                    },
+                    "field": self.smoke_field() | { "data": buf },
                     "dst_mip": mip,
                 }, mip)
 

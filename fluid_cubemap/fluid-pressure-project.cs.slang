@@ -52,8 +52,20 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
     float w_zm = zm_ok ? velocity.load(zm_cell).z : -w_center;
     float w_zp = zp_ok ? velocity.load(zp_cell).z : -w_center;
 
-    divergence.store(cell, (vel_xp - vel_xm) / (dist_xm + dist_xp) + (vel_yp - vel_ym) / (dist_ym + dist_yp)
-        + (w_zp - w_zm) / (2.0 * dr));
+    // anelastic divergence constraint div(rho0 * u) = 0: rho0 only varies
+    // radially, so it factors out of the horizontal terms as a plain scalar,
+    // but the vertical term needs to be in flux form (rho0 sampled at each
+    // neighbor layer) to capture d(rho0)/dr; at a closed boundary there's no
+    // neighbor layer to evaluate rho0 at, so the ghost reuses this cell's own
+    // rho0 (consistent with the w sign-flip ghost above)
+    uint layer = cell.z / 6;
+    float r = 1.0 + dr * (layer + 0.5);
+    float rho0 = velocity.sample_density(r);
+    float rho0_zm = zm_ok ? velocity.sample_density(r - dr) : rho0;
+    float rho0_zp = zp_ok ? velocity.sample_density(r + dr) : rho0;
+
+    divergence.store(cell, rho0 * ((vel_xp - vel_xm) / (dist_xm + dist_xp) + (vel_yp - vel_ym) / (dist_ym + dist_yp))
+        + (rho0_zp * w_zp - rho0_zm * w_zm) / (2.0 * dr));
 }
 
 [shader("compute")]
@@ -127,7 +139,7 @@ void resample(uint3 thread: SV_DispatchThreadID)
 
     // pass the cell's own layer through -- omitting it would silently
     // default to layer 0, scrambling every other layer's multires solve
-    pressure_correction[1].store(cell, pressure_correction[0].sample(dir, src_mip_level, float(cell.z / 6)), dst_mip_level);
+    pressure_correction[1].store(cell, pressure_correction[0].sample_layer(dir, src_mip_level, cell.z / 6), dst_mip_level);
 }
 
 [shader("compute")]
@@ -171,8 +183,15 @@ void apply(uint3 thread: SV_DispatchThreadID)
     float p_zp = zp_ok ? pressure_correction[0].load(zp_cell) : p_center;
     float grad_z = (p_zp - p_zm) / (2.0 * dr);
 
+    // the correction was solved for as u -= (dt/rho0) * grad(p) folded into
+    // a single constant-coefficient Poisson solve (see compute_divergence),
+    // so rho0 has to be divided back out here rather than in `step`
+    uint layer = cell.z / 6;
+    float r = 1.0 + dr * (layer + 0.5);
+    float rho0 = velocity.sample_density(r);
+
     float3 vel = velocity.load(cell);
-    vel.xy -= grad;
-    vel.z -= grad_z;
+    vel.xy -= grad / rho0;
+    vel.z -= grad_z / rho0;
     velocity.store(cell, vel);
 }
