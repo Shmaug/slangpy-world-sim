@@ -52,18 +52,6 @@ void render(uint2 pixel: SV_DispatchThreadID)
 
         switch ((RenderMode)render_mode)
         {
-            case RenderMode::Smoke:
-            {
-                float s = smoke.sample(pos, mip_level, vertical_layer);
-                c.rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
-                break;
-            }
-            case RenderMode::Velocity:
-            {
-                float3 v = velocity.sample(pos, vertical_layer);
-                c.rgb = 5 * v + 0.5;
-                break;
-            }
             case RenderMode::Tangent:
             {
                 c.rgb = frame.t * 0.5 + 0.5;
@@ -114,5 +102,45 @@ void render(uint2 pixel: SV_DispatchThreadID)
             }
         }
     }
+
+    float2 atmosphere_t;
+    if (intersect_sphere(camera_pos, ray_dir, 1 + smoke.thickness, atmosphere_t))
+    {
+        if ((RenderMode)render_mode == RenderMode::Smoke || (RenderMode)render_mode == RenderMode::Velocity)
+        {
+            atmosphere_t.x = max(0, atmosphere_t.x);
+            if (ray_t.x > 0)
+                atmosphere_t.y = min(ray_t.x, atmosphere_t.y);
+
+            uint N = 32;
+            float total_d = 0;
+            float scale = (atmosphere_t.y - atmosphere_t.x) / float(N);
+            for (uint i = 0; i < N; i++)
+            {
+                float3 pos = camera_pos + ray_dir * lerp(atmosphere_t.x, atmosphere_t.y, i / float(N - 1));
+                float h = length(pos);
+                pos /= h;
+                float v = (h - 1) / (smoke.thickness / smoke.vertical_resolution);
+                float3 rgb;
+                float d;
+                if ((RenderMode)render_mode == RenderMode::Smoke)
+                {
+                    float s = smoke.sample(pos, mip_level, v);
+                    rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
+                    d = s;
+                }
+                else
+                {
+                    float3 v = velocity.sample(pos, v);
+                    rgb = 5 * v + 0.5;
+                    d = length(v);
+                }
+                d *= scale;
+                c.rgb += rgb * exp(-total_d) * d;
+                total_d += d;
+            }
+        }
+    }
+
     image[pixel] = c;
 }

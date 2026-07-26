@@ -41,7 +41,7 @@ class CubeFluidSimulator:
             ) for _ in range(2) ]
             self.velocity_buf = [self.device.create_buffer(
                 element_count = self.vertical_resolution * 6 * self.resolution * self.resolution,
-                struct_size = 8,
+                struct_size = 12,
                 usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
             ) for _ in range(2) ]
             self.divergence_buf = self.device.create_buffer(
@@ -87,12 +87,14 @@ class CubeFluidSimulator:
         self.reset_button = spy.ui.Button(widget, "Reset", callback=reset_cb)
         self.resolution_ui = spy.ui.ComboBox(widget, "Resolution", int(spy.math.ceil(spy.math.log2(self.resolution))), items=[ str(1 << i) for i in range(13) ], callback=res_cb)
         self.vertical_resolution_ui = spy.ui.ComboBox(widget, "Vertical resolution", int(spy.math.ceil(spy.math.log2(self.vertical_resolution))), items=[ str(1 << i) for i in range(4) ], callback=res_cb)
+        self.thickness = spy.ui.DragFloat(widget, "Thickness", 0.1, min=0.001)
         self.solver_iterations = spy.ui.DragInt(widget, "Solver iterations", value=10)
         self.solver_fine_iterations = spy.ui.DragInt(widget, "Solver fine iterations", value=4)
         self.multires_solve = spy.ui.CheckBox(widget, "Multiresolution solver", value=True)
         self.preserve_smoke = spy.ui.CheckBox(widget, "Preserve smoke quantity", value=True)
         self.dt = spy.ui.DragFloat(widget, "Timestep", 0.01)
         self.emit_plume = spy.ui.CheckBox(widget, "Emit plume")
+        self.plume_rise_speed = spy.ui.DragFloat(widget, "Plume rise speed", 0.05)
         self.smoke_amount_ui = spy.ui.Text(widget, f"Smoke: {float(0):.3f}")
         self.divergence_ui = spy.ui.Text(widget, f"Divergence: {float(0):.3f}")
 
@@ -102,13 +104,15 @@ class CubeFluidSimulator:
     def smoke_field(self, pingpong=0):
         return {
             "data": self.smoke_buf[pingpong],
+            "thickness": self.thickness.value,
             "resolution": self.resolution,
             "vertical_resolution": self.vertical_resolution
         }
-    
+
     def velocity_field(self, pingpong=0):
         return {
             "data": self.velocity_buf[pingpong],
+            "thickness": self.thickness.value,
             "resolution": self.resolution,
             "vertical_resolution": self.vertical_resolution
         }
@@ -172,11 +176,12 @@ class CubeFluidSimulator:
         # handle emitters
         if self.emit_plume.value:
             dispatch(self.emit_kernel, {
-                "smoke":        self.smoke_field(1),
-                "velocity":     self.velocity_field(1),
-                "target_pos":   spy.float3(0,0,1),
-                "target_angle": np.radians(3),
-                "target_dir":   spy.float3(0,.1,0),
+                "smoke":            self.smoke_field(1),
+                "velocity":         self.velocity_field(1),
+                "target_pos":       spy.float3(0,0,1),
+                "target_angle":     np.radians(3),
+                "target_dir":       spy.float3(0,.1,0),
+                "plume_rise_speed": self.plume_rise_speed.value,
             })
 
         # solve divergence

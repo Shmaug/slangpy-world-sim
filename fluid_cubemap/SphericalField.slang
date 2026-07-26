@@ -78,6 +78,24 @@ uint flatten_cube_texel(uint3 texel, uint resolution, uint vertical_resolution, 
     return offset + morton2d(texel.xy) + texel.z * mip_res * mip_res;
 }
 
+// steps `cell` one layer up/down (same face); returns false at a closed
+// boundary (layer would go out of [0, vertical_resolution)), in which case
+// `neighbor` is set to `cell` itself and the caller must apply the
+// solid-wall ghost value appropriate to the field (sign-flip for the
+// wall-normal velocity component, same-value copy for a Neumann scalar
+// like pressure/divergence)
+bool vertical_neighbor(uint3 cell, int dz, uint vertical_resolution, out uint3 neighbor)
+{
+    int layer = int(cell.z / 6) + dz;
+    if (layer < 0 || layer >= int(vertical_resolution))
+    {
+        neighbor = cell;
+        return false;
+    }
+    neighbor = uint3(cell.xy, cell.z % 6 + 6 * uint(layer));
+    return true;
+}
+
 // texel index of `cell` offset by one texel along the face's u/v axes,
 // stepping onto the neighboring face (with the correct rotated uv) when
 // the offset crosses a face edge
@@ -123,15 +141,24 @@ struct CubeMapTangentFrame
         return float2(dot(vec, t), dot(vec, b));
     }
 
-    float3 to_world(float2 vec)
+    // as to_local, but keeps the normal component as .z instead of
+    // discarding it -- used to round-trip a full (tangential + radial)
+    // world-space vector into local storage
+    float3 to_local3(float3 vec)
     {
-        return t * vec.x + b * vec.y;
+        return float3(dot(vec, t), dot(vec, b), dot(vec, n));
+    }
+
+    float3 to_world(float3 vec)
+    {
+        return t * vec.x + b * vec.y + n * vec.z;
     }
 }
 
 struct SphericalScalarField
 {
     RWStructuredBuffer<float> data;
+    float thickness; // height above 1 of the simulation
     uint resolution;
     uint vertical_resolution;
 
@@ -160,7 +187,7 @@ struct SphericalScalarField
         return cube_neighbor_texel(texel, offset, resolution >> mip);
     }
 
-    float sample(float3 dir, uint mip = 0, uint vertical_layer = 0)
+    float sample_at_layer(float3 dir, uint mip, uint vertical_layer)
     {
         uint mip_res = resolution >> mip;
         float3 cube_uvw = dir_to_cube_uvw(dir);
@@ -185,12 +212,27 @@ struct SphericalScalarField
 
         return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
     }
+
+    // as sample_at_layer, but blends between the two integer layers
+    // straddling `vertical_layer` -- lets a fractional radial position
+    // (as produced by 3D advection) sample smoothly across layers
+    float sample(float3 dir, uint mip = 0, float vertical_layer = 0)
+    {
+        float layer_clamped = clamp(vertical_layer, 0, float(vertical_resolution - 1));
+        uint layer_lo = uint(floor(layer_clamped));
+        uint layer_hi = min(layer_lo + 1, vertical_resolution - 1);
+        float t = layer_clamped - float(layer_lo);
+        return lerp(sample_at_layer(dir, mip, layer_lo), sample_at_layer(dir, mip, layer_hi), t);
+    }
 }
 
 struct SphericalVelocityField
 {
-    // tangent-space velocity field
-    RWStructuredBuffer<float2> data;
+    // local-frame velocity field: .xy is tangential (t,b), .z is the radial
+    // (wall-normal) component, in world units per time (arc length = world
+    // distance since the sphere has radius 1)
+    RWStructuredBuffer<float3> data;
+    float thickness; // height above 1 of the simulation
     uint resolution;
     uint vertical_resolution;
 
@@ -204,11 +246,11 @@ struct SphericalVelocityField
         return all(texel >= 0) && all(texel.xy < resolution) && texel.z < vertical_resolution * 6;
     }
 
-    float2 load(int3 texel, uint mip = 0)
+    float3 load(int3 texel, uint mip = 0)
     {
         return bounds_check(texel) ? data[flatten_index(texel, mip)] : 0;
     }
-    void store(int3 texel, float2 value, uint mip = 0)
+    void store(int3 texel, float3 value, uint mip = 0)
     {
         if (bounds_check(texel))
             data[flatten_index(texel, mip)] = value;
@@ -219,24 +261,24 @@ struct SphericalVelocityField
         return cube_neighbor_texel(texel, offset, resolution);
     }
 
-    float2 to_tangent(float3 pos, float3 vel)
+    float3 to_local(float3 pos, float3 vel)
     {
-        return CubeMapTangentFrame(pos).to_local(vel);
+        return CubeMapTangentFrame(pos).to_local3(vel);
     }
 
     float3 load_world_space(uint3 texel)
     {
         float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        return CubeMapTangentFrame(dir).to_world(data[flatten_index(texel)]);
+        return CubeMapTangentFrame(dir).to_world(load(texel));
     }
     float3 load_world_space(uint3 texel, float3 dst_dir)
     {
         float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        float3 vel = CubeMapTangentFrame(dir).to_world(data[flatten_index(texel)]);
+        float3 vel = CubeMapTangentFrame(dir).to_world(load(texel));
         return sphere_parallel_transport(dir, dst_dir, vel);
     }
 
-    float3 sample(float3 dir, uint vertical_layer = 0)
+    float3 sample_at_layer(float3 dir, uint vertical_layer)
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
 
@@ -253,12 +295,25 @@ struct SphericalVelocityField
         float2 frac = frac_uv - 0.5 - float2(off);
 
         uint3 home_cell = uint3(uint2(home), uint(cube_uvw.z) + 6 * vertical_layer);
-        
+
         float3 s00 = load_world_space(get_neighbor(home_cell, off + int2(0, 0)), dir);
         float3 s10 = load_world_space(get_neighbor(home_cell, off + int2(1, 0)), dir);
         float3 s01 = load_world_space(get_neighbor(home_cell, off + int2(0, 1)), dir);
         float3 s11 = load_world_space(get_neighbor(home_cell, off + int2(1, 1)), dir);
 
         return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
+    }
+
+    // as sample_at_layer, but blends between the two integer layers
+    // straddling `vertical_layer`; no extra transport is needed between
+    // them since both layers share the same (dir) angular footprint and
+    // therefore the same tangent frame
+    float3 sample(float3 dir, float vertical_layer = 0)
+    {
+        float layer_clamped = clamp(vertical_layer, 0, float(vertical_resolution - 1));
+        uint layer_lo = uint(floor(layer_clamped));
+        uint layer_hi = min(layer_lo + 1, vertical_resolution - 1);
+        float t = layer_clamped - float(layer_lo);
+        return lerp(sample_at_layer(dir, layer_lo), sample_at_layer(dir, layer_hi), t);
     }
 }
