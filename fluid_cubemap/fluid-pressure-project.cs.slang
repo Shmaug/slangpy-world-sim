@@ -14,7 +14,7 @@ uniform uint dst_mip_level;
 [numthreads(8, 8, 1)]
 void compute_divergence(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy >= velocity.resolution) || thread.z >= 6)
+    if (any(thread.xy >= velocity.resolution) || thread.z >= 6 * velocity.vertical_resolution)
         return;
 
     uint3 cell = thread;
@@ -48,7 +48,7 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
 void step(uint3 thread: SV_DispatchThreadID)
 {
     uint res = velocity.resolution >> dst_mip_level;
-    if (any(thread.xy >= res) || thread.z >= 6)
+    if (any(thread.xy >= res) || thread.z >= 6 * velocity.vertical_resolution)
         return;
 
     uint3 cell = thread;
@@ -91,7 +91,7 @@ void step(uint3 thread: SV_DispatchThreadID)
 void resample(uint3 thread: SV_DispatchThreadID)
 {
     uint dst_res = velocity.resolution >> dst_mip_level;
-    if (any(thread.xy >= dst_res) || thread.z >= 6)
+    if (any(thread.xy >= dst_res) || thread.z >= 6 * velocity.vertical_resolution)
         return;
 
     uint3 cell = thread;
@@ -104,7 +104,7 @@ void resample(uint3 thread: SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void apply(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy >= velocity.resolution) || thread.z >= 6)
+    if (any(thread.xy >= velocity.resolution) || thread.z >= 6 * velocity.vertical_resolution)
         return;
 
     uint3 cell = thread;

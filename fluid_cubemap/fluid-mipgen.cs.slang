@@ -8,7 +8,7 @@ uint dst_mip;
 void generate_mip(uint3 thread: SV_DispatchThreadID)
 {
     uint res = field.resolution >> dst_mip;
-    if (any(thread.xy >= res) || thread.z >= 6)
+    if (any(thread.xy >= res) || thread.z >= 6 * field.vertical_resolution)
         return;
 
     float f00 = field.load(uint3(thread.xy*2 + uint2(0, 0), thread.z), dst_mip - 1);

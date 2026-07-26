@@ -27,32 +27,20 @@ class CubeFluidSimulator:
         self.velocity_buf:list[spy.Buffer] = []
         self.divergence_buf:spy.Buffer = None # type:ignore
         self.pressure_correction_buf:list[spy.Buffer] = []
-
-        self.smoke_readback = self.device.create_buffer(
-            element_count = 6,
-            struct_size = 4,
-            format = spy.Format.r32_float,
-            memory_type = spy.MemoryType.read_back,
-            usage = spy.BufferUsage.copy_destination,
-        )
-        self.divergence_readback = self.device.create_buffer(
-            element_count = 6,
-            struct_size = 4,
-            format = spy.Format.r32_float,
-            memory_type = spy.MemoryType.read_back,
-            usage = spy.BufferUsage.copy_destination,
-        )
+        self.smoke_readback:spy.Buffer = None # type:ignore
+        self.divergence_readback:spy.Buffer = None # type:ignore
 
         self.resolution = 512
+        self.vertical_resolution = 1
         def create_buffers():
-            total_texels = sum(6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()))
+            total_texels = sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()))
             self.smoke_buf = [self.device.create_buffer(
                 element_count = total_texels,
                 struct_size = 4,
                 usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
             ) for _ in range(2) ]
             self.velocity_buf = [self.device.create_buffer(
-                element_count = 6 * self.resolution * self.resolution,
+                element_count = self.vertical_resolution * 6 * self.resolution * self.resolution,
                 struct_size = 8,
                 usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
             ) for _ in range(2) ]
@@ -67,6 +55,21 @@ class CubeFluidSimulator:
                 usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
             ) for _ in range(2) ]
 
+            self.smoke_readback = self.device.create_buffer(
+                element_count = 6 * self.vertical_resolution,
+                struct_size = 4,
+                format = spy.Format.r32_float,
+                memory_type = spy.MemoryType.read_back,
+                usage = spy.BufferUsage.copy_destination,
+            )
+            self.divergence_readback = self.device.create_buffer(
+                element_count = 6 * self.vertical_resolution,
+                struct_size = 4,
+                format = spy.Format.r32_float,
+                memory_type = spy.MemoryType.read_back,
+                usage = spy.BufferUsage.copy_destination,
+            )
+
             self.reset = True
 
         create_buffers()
@@ -76,12 +79,14 @@ class CubeFluidSimulator:
         def step_cb():
             self.step_once = True
         def res_cb(value):
+            self.vertical_resolution = min(max(1,1<<self.vertical_resolution_ui.value), 1<<3)
             self.resolution = min(max(1,1<<self.resolution_ui.value), 1<<12)
             create_buffers()
         self.paused = spy.ui.CheckBox(widget, "Pause")
         spy.ui.Button(widget, "Step", callback=step_cb)
         self.reset_button = spy.ui.Button(widget, "Reset", callback=reset_cb)
         self.resolution_ui = spy.ui.ComboBox(widget, "Resolution", int(spy.math.ceil(spy.math.log2(self.resolution))), items=[ str(1 << i) for i in range(13) ], callback=res_cb)
+        self.vertical_resolution_ui = spy.ui.ComboBox(widget, "Vertical resolution", int(spy.math.ceil(spy.math.log2(self.vertical_resolution))), items=[ str(1 << i) for i in range(4) ], callback=res_cb)
         self.solver_iterations = spy.ui.DragInt(widget, "Solver iterations", value=10)
         self.solver_fine_iterations = spy.ui.DragInt(widget, "Solver fine iterations", value=4)
         self.multires_solve = spy.ui.CheckBox(widget, "Multiresolution solver", value=True)
@@ -98,12 +103,14 @@ class CubeFluidSimulator:
         return {
             "data": self.smoke_buf[pingpong],
             "resolution": self.resolution,
+            "vertical_resolution": self.vertical_resolution
         }
     
     def velocity_field(self, pingpong=0):
         return {
             "data": self.velocity_buf[pingpong],
             "resolution": self.resolution,
+            "vertical_resolution": self.vertical_resolution
         }
     
     def step(self, command_encoder:spy.CommandEncoder, dt):
@@ -122,15 +129,15 @@ class CubeFluidSimulator:
         def pressure_project_vars(dst_mip = 0, src_mip = 0):
             return {
                 "velocity": self.velocity_field(1),
-                "divergence": { "data": self.divergence_buf, "resolution": self.resolution },
-                "pressure_correction": [ { "data": self.pressure_correction_buf[i], "resolution": self.resolution } for i in range(2) ],
+                "divergence": { "data": self.divergence_buf, "resolution": self.resolution, "vertical_resolution": self.vertical_resolution },
+                "pressure_correction": [ { "data": self.pressure_correction_buf[i], "resolution": self.resolution, "vertical_resolution": self.vertical_resolution } for i in range(2) ],
                 "dst_mip_level": dst_mip,
                 "src_mip_level": src_mip,
             }
         
         def dispatch(kernel, vars, mip = 0):
             res = self.resolution >> mip
-            kernel.dispatch([res, res, 6], vars, command_encoder)
+            kernel.dispatch([res, res, 6 * self.vertical_resolution], vars, command_encoder)
 
         def generate_mips(buf):
             for mip in range(1, self.mip_count()):
@@ -138,6 +145,7 @@ class CubeFluidSimulator:
                     "field": {
                         "data": buf,
                         "resolution": self.resolution,
+                        "vertical_resolution": self.vertical_resolution
                     },
                     "dst_mip": mip,
                 }, mip)
@@ -208,19 +216,18 @@ class CubeFluidSimulator:
         generate_mips(self.divergence_buf)
         command_encoder.copy_buffer(
             self.divergence_readback, 0,
-            self.divergence_buf, 4 * sum(6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
-            6 * 4
+            self.divergence_buf, 4 * sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
+            self.vertical_resolution * 6 * 4
         )
         self.divergence_ui.text = f"Divergence: {self.divergence_readback.to_numpy().view(np.float32).mean() * (6 * self.resolution * self.resolution):.3f}"
 
         generate_mips(self.smoke_buf[1])
         command_encoder.copy_buffer(
             self.smoke_readback, 0,
-            self.smoke_buf[1], 4 * sum(6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
-            6 * 4
+            self.smoke_buf[1], 4 * sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
+            self.vertical_resolution * 6 * 4
         )
         self.smoke_amount_ui.text = f"Smoke: {self.smoke_readback.to_numpy().view(np.float32).mean():.3f}"
-
 
         swap(self.smoke_buf)
         swap(self.velocity_buf)

@@ -12,10 +12,10 @@ uniform float3 target_dir;
 [numthreads(8, 8, 1)]
 void emit_plume(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy >= velocity.resolution) || thread.z >= 6)
+    if (any(thread.xy >= velocity.resolution) || thread.z >= 6 * velocity.vertical_resolution)
         return;
 
-    float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / velocity.resolution, thread.z));
+    float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / velocity.resolution, thread.z%6));
 
     // Distance from emission point
     float angle = acos(clamp(dot(target_pos, pos), -1.0, 1.0));
@@ -26,7 +26,10 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
         float normalized_dist = angle / (target_angle * 2.0);
         float gaussian = exp(-normalized_dist * normalized_dist * 4.0);
 
+        uint layer = thread.z / 6;
+        float vertical_angle = M_2PI * float(layer) / float(velocity.vertical_resolution);
+
         smoke.store(thread, smoke.load(thread) + gaussian);
-        velocity.store(thread, velocity.load(thread) + gaussian * velocity.to_tangent(pos, target_dir));
+        velocity.store(thread, velocity.load(thread) + gaussian * velocity.to_tangent(pos, float3(sin(vertical_angle), cos(vertical_angle), 0)));
     }
 }

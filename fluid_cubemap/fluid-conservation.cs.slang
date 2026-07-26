@@ -8,15 +8,15 @@ uniform uint mip_count;
 [numthreads(8, 8, 1)]
 void conserve_smoke(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy >= fluid_post.resolution) || thread.z >= 6)
+    if (any(thread.xy >= fluid_post.resolution) || thread.z >= 6 * fluid_pre.vertical_resolution)
         return;
 
     float pre = 0;
     float post = 0;
     for (uint i = 0; i < 6; i++)
     {
-        pre += fluid_pre.load(uint3(0,0,i), mip_count - 1);
-        post += fluid_post.load(uint3(0,0,i), mip_count - 1);
+        pre += fluid_pre.load(uint3(0, 0, i + 6*(thread.z/6)), mip_count - 1);
+        post += fluid_post.load(uint3(0, 0, i + 6*(thread.z/6)), mip_count - 1);
     }
     fluid_post.store(thread, fluid_post.load(thread) * (abs(post) > 0 ? pre / post : 0));
 }

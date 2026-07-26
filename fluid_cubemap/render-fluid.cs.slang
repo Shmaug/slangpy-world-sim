@@ -11,6 +11,7 @@ uniform uint     render_mode;
 uniform uint2    resolution;
 uniform float2   mouse_pos;
 uniform uint     mip_level;
+uniform uint     vertical_layer;
 
 RWTexture2D<float4> image;
 
@@ -53,14 +54,14 @@ void render(uint2 pixel: SV_DispatchThreadID)
         {
             case RenderMode::Smoke:
             {
-                float smoke = smoke.sample(pos, mip_level);
-                c.rgb = saturate(float3(1 - exp(smoke), 1 - exp(-smoke), 0.1));
+                float s = smoke.sample(pos, mip_level, vertical_layer);
+                c.rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
                 break;
             }
             case RenderMode::Velocity:
             {
-                float3 vel = velocity.sample(pos);
-                c.rgb = 5 * vel + 0.5;
+                float3 v = velocity.sample(pos, vertical_layer);
+                c.rgb = 5 * v + 0.5;
                 break;
             }
             case RenderMode::Tangent:

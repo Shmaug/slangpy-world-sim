@@ -7,16 +7,6 @@ float sphere_geodesic_distance(float3 a, float3 b)
     return acos(clamp(dot(a, b), -1.0, 1.0));
 }
 
-// advances unit vector `pos` along the great circle in the direction of
-// tangent vector `v` (tangent to the sphere at `pos`) by angle |v|
-[Differentiable]
-float3 sphere_exp_map(float3 pos, float3 v)
-{
-    float theta = length(v);
-    if (theta < 1e-8) return pos;
-    return pos * cos(theta) + (v / theta) * sin(theta);
-}
-
 // parallel-transports tangent vector `vec` (tangent to the sphere at
 // `from`) along the great-circle arc from `from` to `to`, returning the
 // corresponding tangent vector at `to`
@@ -66,7 +56,7 @@ float3 dir_to_cube_uvw(float3 dir)
 float3 cube_uvw_to_dir(float3 uvw)
 {
     float2 sc = uvw.xy * 2.0 - 1.0;
-    int face = int(uvw.z);
+    int face = int(uvw.z) % 6;
 
     float3 dir;
     if      (face == 0) dir = float3( 1.0,  sc.y, -sc.x);
@@ -79,11 +69,11 @@ float3 cube_uvw_to_dir(float3 uvw)
     return normalize(dir);
 }
 
-uint flatten_cube_texel(uint3 texel, uint resolution, uint mip = 0)
+uint flatten_cube_texel(uint3 texel, uint resolution, uint vertical_resolution, uint mip = 0)
 {
     uint offset = 0;
     for (uint i = 0; i < mip; i++)
-        offset += (resolution >> i) * (resolution >> i) * 6;
+        offset += (resolution >> i) * (resolution >> i) * 6 * vertical_resolution;
     uint mip_res = resolution >> mip;
     return offset + morton2d(texel.xy) + texel.z * mip_res * mip_res;
 }
@@ -104,7 +94,7 @@ uint3 cube_neighbor_texel(uint3 cell, int2 offset, uint resolution)
     float3 dir = cube_uvw_to_dir(float3((float2(cell.xy) + 0.5 + offset) / float(resolution), cell.z));
     float3 uvw = dir_to_cube_uvw(dir);
     uint2 wrapped = uint2(clamp(int2(uvw.xy * resolution), 0, int(resolution) - 1));
-    return uint3(wrapped, uint(uvw.z));
+    return uint3(wrapped, uint(uvw.z) + 6*(cell.z/6));
 }
 
 struct CubeMapTangentFrame
@@ -143,19 +133,26 @@ struct SphericalScalarField
 {
     RWStructuredBuffer<float> data;
     uint resolution;
+    uint vertical_resolution;
 
     uint flatten_index(uint3 texel, uint mip = 0)
     {
-        return flatten_cube_texel(texel, resolution, mip);
+        return flatten_cube_texel(texel, resolution, vertical_resolution, mip);
     }
 
-    float load(uint3 texel, uint mip = 0)
+    bool bounds_check(int3 texel)
     {
-        return data[flatten_index(texel, mip)];
+        return all(texel >= 0) && all(texel.xy < resolution) && texel.z < 6 * vertical_resolution;
     }
-    void store(uint3 texel, float value, uint mip = 0)
+
+    float load(int3 texel, uint mip = 0)
     {
-        data[flatten_index(texel, mip)] = value;
+        return bounds_check(texel) ? data[flatten_index(texel, mip)] : 0;
+    }
+    void store(int3 texel, float value, uint mip = 0)
+    {
+        if (bounds_check(texel))
+            data[flatten_index(texel, mip)] = value;
     }
 
     uint3 get_neighbor(uint3 texel, int2 offset, uint mip = 0)
@@ -163,7 +160,7 @@ struct SphericalScalarField
         return cube_neighbor_texel(texel, offset, resolution >> mip);
     }
 
-    float sample(float3 dir, uint mip = 0)
+    float sample(float3 dir, uint mip = 0, uint vertical_layer = 0)
     {
         uint mip_res = resolution >> mip;
         float3 cube_uvw = dir_to_cube_uvw(dir);
@@ -180,7 +177,7 @@ struct SphericalScalarField
         int2 off = int2(frac_uv.x < 0.5 ? -1 : 0, frac_uv.y < 0.5 ? -1 : 0);
         float2 frac = frac_uv - 0.5 - float2(off);
 
-        uint3 home_cell = uint3(uint2(home), uint(cube_uvw.z));
+        uint3 home_cell = uint3(uint2(home), uint(cube_uvw.z) + 6 * vertical_layer);
         float s00 = load(get_neighbor(home_cell, off + int2(0, 0), mip), mip);
         float s10 = load(get_neighbor(home_cell, off + int2(1, 0), mip), mip);
         float s01 = load(get_neighbor(home_cell, off + int2(0, 1), mip), mip);
@@ -195,19 +192,26 @@ struct SphericalVelocityField
     // tangent-space velocity field
     RWStructuredBuffer<float2> data;
     uint resolution;
+    uint vertical_resolution;
 
-    uint flatten_index(uint3 texel)
+    uint flatten_index(uint3 texel, uint mip = 0)
     {
-        return flatten_cube_texel(texel, resolution);
+        return flatten_cube_texel(texel, resolution, vertical_resolution, mip);
     }
 
-    float2 load(uint3 texel)
+    bool bounds_check(int3 texel)
     {
-        return data[flatten_index(texel)];
+        return all(texel >= 0) && all(texel.xy < resolution) && texel.z < vertical_resolution * 6;
     }
-    void store(uint3 texel, float2 value)
+
+    float2 load(int3 texel, uint mip = 0)
     {
-        data[flatten_index(texel)] = value;
+        return bounds_check(texel) ? data[flatten_index(texel, mip)] : 0;
+    }
+    void store(int3 texel, float2 value, uint mip = 0)
+    {
+        if (bounds_check(texel))
+            data[flatten_index(texel, mip)] = value;
     }
 
     uint3 get_neighbor(uint3 texel, int2 offset)
@@ -232,7 +236,7 @@ struct SphericalVelocityField
         return sphere_parallel_transport(dir, dst_dir, vel);
     }
 
-    float3 sample(float3 dir)
+    float3 sample(float3 dir, uint vertical_layer = 0)
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
 
@@ -248,7 +252,7 @@ struct SphericalVelocityField
         int2 off = int2(frac_uv.x < 0.5 ? -1 : 0, frac_uv.y < 0.5 ? -1 : 0);
         float2 frac = frac_uv - 0.5 - float2(off);
 
-        uint3 home_cell = uint3(uint2(home), uint(cube_uvw.z));
+        uint3 home_cell = uint3(uint2(home), uint(cube_uvw.z) + 6 * vertical_layer);
         
         float3 s00 = load_world_space(get_neighbor(home_cell, off + int2(0, 0)), dir);
         float3 s10 = load_world_space(get_neighbor(home_cell, off + int2(1, 0)), dir);
