@@ -129,9 +129,7 @@ struct CubeMapTangentFrame
 
     float2 to_local(float3 vec)
     {
-        float l = length(vec);
-        vec -= n * dot(vec, n);
-        vec = safe_normalize(vec) * l;
+        vec -= n * dot(vec, n); // remove normal component
         return float2(dot(vec, t), dot(vec, b));
     }
 
@@ -215,6 +213,11 @@ struct SphericalVelocityField
     uint3 get_neighbor(uint3 texel, int2 offset)
     {
         return cube_neighbor_texel(texel, offset, resolution);
+    }
+
+    float2 to_tangent(float3 pos, float3 vel)
+    {
+        return CubeMapTangentFrame(pos).to_local(vel);
     }
 
     float3 load_world_space(uint3 texel)

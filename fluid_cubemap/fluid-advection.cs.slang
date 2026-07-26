@@ -53,5 +53,5 @@ void advect(uint3 thread: SV_DispatchThreadID)
     float3 transported_velocity = sphere_parallel_transport(sampled_pos, pos, sampled_velocity);
 
     smoke_out.store(thread, sampled_smoke);
-    velocity_out.store(thread, CubeMapTangentFrame(pos).to_local(transported_velocity));
+    velocity_out.store(thread, velocity.to_tangent(pos, transported_velocity));
 }
