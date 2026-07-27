@@ -31,6 +31,11 @@ class CubeFluidSimulator:
         self.smoke_readback:spy.Buffer = None # type:ignore
         self.divergence_readback:spy.Buffer = None # type:ignore
 
+        self.heightmap:spy.Texture|None = None
+        self.heightmap_sqr:spy.Texture|None = None
+        self.linear_sampler = self.device.create_sampler(address_v=spy.TextureAddressingMode.mirror_repeat)
+        self.terrain_height = 0.0
+
         self.resolution = 512
         self.vertical_resolution = 1
         self.radius = 1.0
@@ -171,6 +176,11 @@ class CubeFluidSimulator:
                 "pressure_correction": [ field_vars(self.pressure_correction_buf[i]) for i in range(2) ],
                 "dst_mip_level": dst_mip,
                 "src_mip_level": src_mip,
+
+                "surface_height": self.heightmap,
+                "surface_height2": self.heightmap_sqr,
+                "linear_sampler": self.linear_sampler,
+                "terrain_height": self.terrain_height,
             }
         
         def dispatch(kernel, vars, mip = 0):

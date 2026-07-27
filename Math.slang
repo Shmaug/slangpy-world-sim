@@ -40,6 +40,16 @@ float sqr(float a)
     return a * a;
 }
 
+// Abramowitz & Stegun 7.1.26 approximation (max error ~1.5e-7)
+float erf(float x)
+{
+    float s = sign(x);
+    x = abs(x);
+    float t = 1.0 / (1.0 + 0.3275911 * x);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x);
+    return s * y;
+}
+
 int2 wrap_index(int2 i, uint2 dim)
 {
     return (i + dim) % dim;
@@ -107,7 +117,7 @@ bool intersect_sphere(float3 origin, float3 direction, float radius, out float2 
 }
 
 [Differentiable]
-float3 uv_to_xyz(float2 uv) {
+float3 sphere_uv_to_xyz(float2 uv) {
     return float3(
         sin(uv.y * M_PI) * sin(uv.x * M_2PI),
         cos(uv.y * M_PI),
@@ -115,7 +125,7 @@ float3 uv_to_xyz(float2 uv) {
     );
 }
 [Differentiable]
-float2 xyz_to_uv(float3 xyz)
+float2 xyz_to_sphere_uv(float3 xyz)
 {
     return float2(
         -atan2(xyz.x, -xyz.z) * M_1_2PI + 0.5,
