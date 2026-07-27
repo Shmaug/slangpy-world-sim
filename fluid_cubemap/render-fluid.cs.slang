@@ -14,6 +14,7 @@ uniform float2   mouse_pos;
 uniform uint     mip_level;
 uniform uint     frame_index;
 uniform uint     linear_sampling;
+uniform int      render_channel;
 
 RWTexture2D<float4> image;
 
@@ -59,8 +60,22 @@ void render(uint2 pixel: SV_DispatchThreadID)
             {
                 if (smoke.vertical_resolution == 1)
                 {
-                    float s = linear_sampling == 0 ? smoke.sample_layer_nearest(dir, mip_level, 0) : smoke.sample_layer(dir, mip_level, 0);
-                    c.rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
+                    if (smoke.channels == 1 || render_channel >= 0 && render_channel < smoke.channels)
+                    {
+                        uint ch = render_channel >= 0 && render_channel < smoke.channels ? render_channel : 0;
+                        float s = linear_sampling == 0 ? smoke.sample_layer_nearest<1>(dir, ch, 0, mip_level) : smoke.sample_layer<1>(dir, ch, 0, mip_level);
+                        c.rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
+                    }
+                    else if (smoke.channels == 2)
+                    {
+                        float2 s = linear_sampling == 0 ? smoke.sample_layer_nearest<2>(dir, 0, 0, mip_level) : smoke.sample_layer<2>(dir, 0, 0, mip_level);
+                        c.rgb = saturate(float3(s, 0.1));
+                    }
+                    else if (smoke.channels >= 3)
+                    {
+                        float3 s = linear_sampling == 0 ? smoke.sample_layer_nearest<3>(dir, 0, 0, mip_level) : smoke.sample_layer<3>(dir, 0, 0, mip_level);
+                        c.rgb = saturate(0.1 + s);
+                    }
                 }
                 break;
             }
@@ -89,9 +104,9 @@ void render(uint2 pixel: SV_DispatchThreadID)
             case RenderMode::Texels:
             {
                 float3 uvw = dir_to_cube_uvw(dir);
-                uint3 texel = uint3(uint2(uvw.xy * smoke.resolution), uint(uvw.z));
+                CubeCoord coord = CubeCoord(uint2(uvw.xy * smoke.resolution), uint(uvw.z), 0, 0);
 
-                c.rgb = float3(uint3(pcg(texel.x + pcg(texel.y)), pcg(texel.y + pcg(texel.x)), 0) % 255) / 255;
+                c.rgb = float3(uint3(pcg(coord.texel.x + pcg(coord.texel.y)), pcg(coord.texel.y + pcg(coord.texel.x)), 0) % 255) / 255;
                 c.rgb = lerp(c.rgb, 0.5, 0.75);
 
                 float3 mouse_ray_dir = get_ray_dir(mouse_pos);
@@ -100,8 +115,8 @@ void render(uint2 pixel: SV_DispatchThreadID)
                 {
                     float3 mouse_pos = camera_pos + mouse_ray_dir * mouse_t.x;
                     float3 mouse_uvw = dir_to_cube_uvw(mouse_pos);
-                    uint3 mouse_texel = uint3(uint2(mouse_uvw.xy * smoke.resolution), uint(mouse_uvw.z));
-                    if (all(mouse_texel == texel))
+                    CubeCoord mouse_coord = CubeCoord(uint2(mouse_uvw.xy * smoke.resolution), uint(mouse_uvw.z), 0, 0);
+                    if (all(mouse_coord.texel == coord.texel) && mouse_coord.face == coord.face)
                     {
                         c.rgb = 1;
                     }
@@ -114,8 +129,8 @@ void render(uint2 pixel: SV_DispatchThreadID)
                     };
                     for (uint i = 0; i < 4; i++)
                     {
-                        uint3 neighbor_texel = cube_neighbor_texel(texel, neighbors[i], smoke.resolution);
-                        if (all(mouse_texel == neighbor_texel))
+                        CubeCoord neighbor_coord = cube_neighbor_texel(coord, neighbors[i], smoke.resolution);
+                        if (all(mouse_coord.texel == neighbor_coord.texel) && mouse_coord.face == neighbor_coord.face)
                         {
                             c.rgb = float3(1, 0, 0);
                         }
@@ -154,9 +169,23 @@ void render(uint2 pixel: SV_DispatchThreadID)
                     float density;
                     if ((RenderMode)render_mode == RenderMode::Smoke)
                     {
-                        float s = linear_sampling == 0 ? smoke.sample_nearest(pos, mip_level) : smoke.sample(pos, mip_level);;
-                        color = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
-                        density = 1 + s;
+                        float3 s;
+                        if (smoke.channels == 1 || render_channel >= 0 && render_channel < smoke.channels)
+                        {
+                            uint ch = render_channel >= 0 && render_channel < smoke.channels ? render_channel : 0;
+                            s.x = linear_sampling == 0 ? smoke.sample_nearest<1>(pos, ch, mip_level) : smoke.sample<1>(pos, ch, mip_level);
+                            s = 0.1 + float3(1 - exp(s.x), 1 - exp(-s.x), 0.1);
+                        }
+                        else if (smoke.channels == 2)
+                        {
+                            s.xy = linear_sampling == 0 ? smoke.sample_nearest<2>(pos, 0, mip_level) : smoke.sample<2>(pos, 0, mip_level);
+                            s.z = 0.1;
+                        }
+                        else if (smoke.channels >= 3)
+                        {
+                            s = 0.1 + (linear_sampling == 0 ? smoke.sample_nearest<3>(pos, 0, mip_level) : smoke.sample<3>(pos, 0, mip_level));
+                        }
+                        density = 0.1 + dot(s,1);
                     }
                     else
                     {
@@ -164,7 +193,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
                         if ((RenderMode)render_mode == RenderMode::TangentVelocity)
                             v = velocity.to_local(normalize(pos), v);
                         color = 5 * v + 0.5;
-                        density = length(v);
+                        density = 0.1 + length(v);
                     }
 
                     density *= velocity.sample_density(length(pos));

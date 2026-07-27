@@ -38,6 +38,7 @@ class CubeFluidSimulator:
 
         self.resolution = 512
         self.vertical_resolution = 1
+        self.channels = 1
         self.radius = 1.0
         self.thickness = 0.1
         self.density_scale_height = 0.05
@@ -58,6 +59,7 @@ class CubeFluidSimulator:
                 self.vertical_resolution = min(max(1,1+self.vertical_resolution_ui.value), 8)
                 self.resolution = min(max(1,1<<self.resolution_ui.value), 1<<12)
                 self.radius = self.radius_ui.value
+                self.channels = self.channels_ui.value
                 self.thickness = max(1e-4, self.thickness_ui.value)
                 self.density_scale_height = max(1e-4, self.atmosphere_scale_height_ui.value)
                 self.solver_iterations = self.solver_iterations_ui.value
@@ -70,6 +72,7 @@ class CubeFluidSimulator:
             self.paused = spy.ui.CheckBox(widget, "Pause")
             spy.ui.Button(widget, "Step", callback=step_cb)
             self.reset_button = spy.ui.Button(widget, "Reset", callback=reset_cb)
+            self.channels_ui = spy.ui.DragInt(widget, "Channels", self.channels, min=1, max=4, callback=create_cb)
             self.resolution_ui = spy.ui.ComboBox(widget, "Resolution", int(spy.math.ceil(spy.math.log2(self.resolution))), items=[ str(1 << i) for i in range(13) ], callback=create_cb)
             self.vertical_resolution_ui = spy.ui.ComboBox(widget, "Vertical resolution", self.vertical_resolution-1, items=[ str(i) for i in range(1,8) ], callback=create_cb)
             self.radius_ui = spy.ui.DragFloat(widget, "Radius", 1, min=1e-4, speed = 0.01, callback=update_cb)
@@ -90,7 +93,7 @@ class CubeFluidSimulator:
         total_texels = sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()))
         self.smoke_buf = [self.device.create_buffer(
             element_count = total_texels,
-            struct_size = 4,
+            struct_size = 4 * self.channels,
             usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
         ) for _ in range(2) ]
         self.velocity_buf = [self.device.create_buffer(
@@ -111,7 +114,7 @@ class CubeFluidSimulator:
 
         self.smoke_readback = self.device.create_buffer(
             element_count = 6 * self.vertical_resolution,
-            struct_size = 4,
+            struct_size = 4 * self.channels,
             format = spy.Format.r32_float,
             memory_type = spy.MemoryType.read_back,
             usage = spy.BufferUsage.copy_destination,
@@ -146,7 +149,8 @@ class CubeFluidSimulator:
             "thickness": self.thickness,
             "scale_height": self.density_scale_height,
             "resolution": self.resolution,
-            "vertical_resolution": self.vertical_resolution
+            "vertical_resolution": self.vertical_resolution,
+            "channels": self.channels,
         }
 
     def dispatch_dim(self, mip:int = 0):
@@ -167,7 +171,7 @@ class CubeFluidSimulator:
         self.step_once = False
 
         def field_vars(buf):
-            return self.smoke_field() | {"data": buf }
+            return self.smoke_field() | { "data": buf, "channels": 1 }
 
         def pressure_project_vars(dst_mip = 0, src_mip = 0):
             vars = {
@@ -190,10 +194,10 @@ class CubeFluidSimulator:
         def dispatch(kernel, vars, mip = 0):
             kernel.dispatch(self.dispatch_dim(mip), vars, command_encoder)
 
-        def generate_mips(buf):
+        def generate_mips(buf, channels=1):
             for mip in range(1, self.mip_count()):
                 dispatch(self.generate_mip_kernel, {
-                    "field": self.smoke_field() | { "data": buf },
+                    "field": self.smoke_field() | { "data": buf, "channels": channels },
                     "dst_mip": mip,
                 }, mip)
 
@@ -208,8 +212,8 @@ class CubeFluidSimulator:
 
         if self.preserve_smoke:
             # ensure total amount of smoke stays the same after advection
-            generate_mips(self.smoke_buf[0])
-            generate_mips(self.smoke_buf[1])
+            generate_mips(self.smoke_buf[0], self.channels)
+            generate_mips(self.smoke_buf[1], self.channels)
             dispatch(self.conserve_smoke_kernel, {
                 "fluid_pre": self.smoke_field(),
                 "fluid_post": self.smoke_field(1),

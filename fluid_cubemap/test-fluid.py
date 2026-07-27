@@ -62,6 +62,7 @@ class App:
         self.dt_ui = spy.ui.DragFloat(window, "Simulation Timestep", 0.01)
 
         self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Tangent Velocity", "Tangent", "Bitangent", "Texels" ])
+        self.render_channel = spy.ui.DragInt(window, "Channel", 0, speed=0.1)
         self.use_linear_sampling = spy.ui.CheckBox(window, "Use linear sampling", value=True)
         self.render_mip = spy.ui.DragInt(window, "Mip Level", 0, min=0)
 
@@ -71,6 +72,7 @@ class App:
         self.plume_speed_ui = spy.ui.DragFloat(window, "Plume speed", 0.2, speed=0.01)
         self.plume_vertical_speed_ui = spy.ui.DragFloat(window, "Plume vertical speed", 0.01, speed=0.01)
         self.plume_radius_ui = spy.ui.DragFloat(window, "Plume radius", 2, speed=0.01)
+        self.emit_channel = spy.ui.DragInt(window, "Emit channel", 0, speed=0.1)
 
         self.emit_kernel = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["emit_plume"]))
 
@@ -110,6 +112,7 @@ class App:
                         "target_dir":   dir,
                         "target_angle": spy.math.radians(self.plume_radius_ui.value),
                         "target_vel":   vel,
+                        "target_channel": min(max(self.emit_channel.value, 0), self.simulator.channels-1)
                     },
                     command_encoder)
         self.simulator.emitters.append(emit_plume)
@@ -206,6 +209,7 @@ class App:
                     "inv_view_projection": spy.math.inverse(view_projection),
                     "camera_pos": self.camera.position,
                     "render_mode": self.render_mode.value,
+                    "render_channel": self.render_channel.value,
                     "resolution": spy.uint2(surface_texture.width, surface_texture.height),
                     "mouse_pos": mouse_pos,
                     "image": self.render_texture,

@@ -86,21 +86,20 @@ void integrate_velocity(float3 pos, float r, out float3 departure_pos, out float
 [numthreads(8, 8, 1)]
 void advect(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy > velocity.resolution) || thread.z >= 6 * velocity.vertical_resolution)
+    CubeCoord cell = CubeCoord(thread.xy, thread.z % 6, thread.z / 6, 0);
+    if (!velocity.bounds_check(cell))
         return;
 
-    uint layer = thread.z / 6;
     float dr = velocity.thickness / velocity.vertical_resolution;
-    float r = 1.0 + dr * (layer + 0.5);
+    float r = 1.0 + dr * (cell.layer + 0.5);
 
-    float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / velocity.resolution, thread.z));
+    float3 pos = cube_uvw_to_dir(float3((cell.texel + 0.5) / velocity.resolution, cell.face));
 
     float3 sampled_pos;
     float sampled_r;
     integrate_velocity(pos, r, sampled_pos, sampled_r);
     float sampled_layer = radius_to_vertical_layer(sampled_r);
 
-    float sampled_smoke = smoke.sample(sampled_pos, sampled_layer, 0);
     float3 sampled_velocity = velocity.sample(sampled_pos, sampled_layer);
 
     // sampled_velocity is expressed at sampled_pos, not pos -- rotate it
@@ -109,7 +108,26 @@ void advect(uint3 thread: SV_DispatchThreadID)
     // mapping sampled_pos to pos, so a component along sampled_pos maps to
     // the same-magnitude component along pos)
     float3 transported_velocity = sphere_parallel_transport(sampled_pos, pos, sampled_velocity);
+    velocity_out.store(cell, velocity.to_local(pos, transported_velocity));
 
-    smoke_out.store(thread, sampled_smoke);
-    velocity_out.store(thread, velocity.to_local(pos, transported_velocity));
+    for (cell.channel = 0; cell.channel < smoke.channels; cell.channel += 4)
+    {
+        uint c_left = smoke.channels - cell.channel;
+        if (c_left >= 4)
+        {
+            smoke_out.store<4>(cell, smoke.sample<4>(sampled_pos, cell.channel, 0));
+        }
+        else if (c_left == 3)
+        {
+            smoke_out.store<3>(cell, smoke.sample<3>(sampled_pos, cell.channel, 0));
+        }
+        else if (c_left == 2)
+        {
+            smoke_out.store<2>(cell, smoke.sample<2>(sampled_pos, cell.channel, 0));
+        }
+        else if (c_left == 1)
+        {
+            smoke_out.store<1>(cell, smoke.sample<1>(sampled_pos, cell.channel, 0));
+        }
+    }
 }

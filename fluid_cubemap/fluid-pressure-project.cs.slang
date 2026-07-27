@@ -72,21 +72,20 @@ float open_fraction(float3 dir, float r, float mip, bool is_bottom)
 [numthreads(8, 8, 1)]
 void compute_divergence(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy >= velocity.resolution) || thread.z >= 6 * velocity.vertical_resolution)
+    CubeCoord cell = CubeCoord(thread.xy, thread.z % 6, thread.z / 6, 0);
+    if (!divergence.bounds_check(cell))
         return;
 
-    uint3 cell = thread;
+    CubeCoord xm = velocity.get_neighbor(cell, int2(-1, 0));
+    CubeCoord xp = velocity.get_neighbor(cell, int2( 1, 0));
+    CubeCoord ym = velocity.get_neighbor(cell, int2( 0,-1));
+    CubeCoord yp = velocity.get_neighbor(cell, int2( 0, 1));
 
-    uint3 xm = velocity.get_neighbor(cell, int2(-1, 0));
-    uint3 xp = velocity.get_neighbor(cell, int2( 1, 0));
-    uint3 ym = velocity.get_neighbor(cell, int2( 0,-1));
-    uint3 yp = velocity.get_neighbor(cell, int2( 0, 1));
-
-    float3 dir    = cube_uvw_to_dir(float3(float2(cell.xy + 0.5) / velocity.resolution, cell.z));
-    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.xy + 0.5) / velocity.resolution, xm.z));
-    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.xy + 0.5) / velocity.resolution, xp.z));
-    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.xy + 0.5) / velocity.resolution, ym.z));
-    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.xy + 0.5) / velocity.resolution, yp.z));
+    float3 dir    = cube_uvw_to_dir(float3(float2(cell.texel + 0.5) / velocity.resolution, cell.face));
+    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.texel + 0.5) / velocity.resolution, xm.face));
+    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.texel + 0.5) / velocity.resolution, xp.face));
+    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.texel + 0.5) / velocity.resolution, ym.face));
+    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.texel + 0.5) / velocity.resolution, yp.face));
 
     let frame = CubeMapTangentFrame(dir);
     float3 vel_center = velocity.load(cell);
@@ -109,9 +108,8 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
     // at a closed boundary the missing neighbor is mirrored with a sign
     // flip so the wall-normal velocity is exactly zero at the wall
     float dr = velocity.thickness / velocity.vertical_resolution;
-    uint layer = cell.z / 6;
-    float r = 1.0 + dr * (layer + 0.5);
-    uint3 zm_cell, zp_cell;
+    float r = 1.0 + dr * (cell.layer + 0.5);
+    CubeCoord zm_cell, zp_cell;
     bool zm_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, zm_cell);
     bool zp_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, zp_cell);
     float w_center = vel_center.z;
@@ -125,8 +123,8 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
     // crosses a ridge that only partially fills the cells it passes
     // through, rather than only reacting once a whole cell is submerged
     float mip = heightmap_mip_level(velocity.resolution);
-    bool self_is_bottom = layer == 0;
-    bool below_is_bottom = zm_ok && layer == 1;
+    bool self_is_bottom = cell.layer == 0;
+    bool below_is_bottom = zm_ok && cell.layer == 1;
     float open_self = open_fraction(dir, r, mip, self_is_bottom);
     float open_xm = min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
     float open_xp = min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
@@ -164,28 +162,26 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void step(uint3 thread: SV_DispatchThreadID)
 {
-    uint res = velocity.resolution >> dst_mip_level;
-    if (any(thread.xy >= res) || thread.z >= 6 * velocity.vertical_resolution)
+    CubeCoord cell = CubeCoord(thread.xy, thread.z % 6, thread.z / 6, 0);
+    if (!divergence.bounds_check(cell, dst_mip_level))
         return;
 
-    uint3 cell = thread;
-
-    uint3 xm = divergence.get_neighbor(cell, int2(-1, 0), dst_mip_level);
-    uint3 xp = divergence.get_neighbor(cell, int2( 1, 0), dst_mip_level);
-    uint3 ym = divergence.get_neighbor(cell, int2( 0,-1), dst_mip_level);
-    uint3 yp = divergence.get_neighbor(cell, int2( 0, 1), dst_mip_level);
+    CubeCoord xm = divergence.get_neighbor(cell, int2(-1, 0), dst_mip_level);
+    CubeCoord xp = divergence.get_neighbor(cell, int2( 1, 0), dst_mip_level);
+    CubeCoord ym = divergence.get_neighbor(cell, int2( 0,-1), dst_mip_level);
+    CubeCoord yp = divergence.get_neighbor(cell, int2( 0, 1), dst_mip_level);
 
     // non-uniform Jacobi stencil for the Laplacian: on a uniform grid every
     // neighbor's weight collapses to 1 (matching the old p*0.25 average),
     // but here each axis's pair of neighbor distances can differ, so the
     // weights are derived from the standard unequal-spacing second-
     // derivative finite-difference formula instead of a plain average
-    float3 dir = cube_uvw_to_dir(float3(float2(cell.xy + 0.5) / velocity.resolution, cell.z));
+    float3 dir = cube_uvw_to_dir(float3(float2(cell.texel + 0.5) / velocity.resolution, cell.face));
     uint mip_res = velocity.resolution >> dst_mip_level;
-    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.xy + 0.5) / mip_res, xm.z));
-    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.xy + 0.5) / mip_res, xp.z));
-    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.xy + 0.5) / mip_res, ym.z));
-    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.xy + 0.5) / mip_res, yp.z));
+    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.texel + 0.5) / mip_res, xm.face));
+    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.texel + 0.5) / mip_res, xp.face));
+    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.texel + 0.5) / mip_res, ym.face));
+    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.texel + 0.5) / mip_res, yp.face));
     float hxm = sphere_geodesic_distance(dir, dir_xm);
     float hxp = sphere_geodesic_distance(dir, dir_xp);
     float hym = sphere_geodesic_distance(dir, dir_ym);
@@ -201,14 +197,13 @@ void step(uint3 thread: SV_DispatchThreadID)
     // wall, so a Neumann (zero-gradient) condition applies: the ghost value
     // is just a copy of this cell's own (current-iterate) pressure.
     float dr = velocity.thickness / velocity.vertical_resolution;
-    uint layer = cell.z / 6;
-    float r = 1.0 + dr * (layer + 0.5);
-    uint3 zm_cell, zp_cell;
+    float r = 1.0 + dr * (cell.layer + 0.5);
+    CubeCoord zm_cell, zp_cell;
     bool zm_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, zm_cell);
     bool zp_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, zp_cell);
-    float p_center = pressure_correction[0].load(cell, dst_mip_level);
-    float p_zm = pressure_correction[0].load(zm_ok ? zm_cell : cell, dst_mip_level);
-    float p_zp = pressure_correction[0].load(zp_ok ? zp_cell : cell, dst_mip_level);
+    float p_center = pressure_correction[0].load<1>(cell, dst_mip_level);
+    float p_zm = pressure_correction[0].load<1>(zm_ok ? zm_cell : cell, dst_mip_level);
+    float p_zp = pressure_correction[0].load<1>(zp_ok ? zp_cell : cell, dst_mip_level);
     float wz = 1.0 / (dr * dr);
 
     // sub-grid terrain porosity (see compute_divergence): scale each
@@ -217,8 +212,8 @@ void step(uint3 thread: SV_DispatchThreadID)
     // rather than needing an explicit ghost value -- zeroing its weight
     // already reproduces the zero-flux wall condition
     float mip = heightmap_mip_level(mip_res);
-    bool self_is_bottom = layer == 0;
-    bool below_is_bottom = zm_ok && layer == 1;
+    bool self_is_bottom = cell.layer == 0;
+    bool below_is_bottom = zm_ok && cell.layer == 1;
     float open_self = open_fraction(dir, r, mip, self_is_bottom);
     wxm *= min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
     wxp *= min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
@@ -228,14 +223,14 @@ void step(uint3 thread: SV_DispatchThreadID)
     float wz_zp = zp_ok ? wz * open_self : 0.0;
 
     float p = 0;
-    p += wxm * pressure_correction[0].load(xm, dst_mip_level);
-    p += wxp * pressure_correction[0].load(xp, dst_mip_level);
-    p += wym * pressure_correction[0].load(ym, dst_mip_level);
-    p += wyp * pressure_correction[0].load(yp, dst_mip_level);
+    p += wxm * pressure_correction[0].load<1>(xm, dst_mip_level).x;
+    p += wxp * pressure_correction[0].load<1>(xp, dst_mip_level).x;
+    p += wym * pressure_correction[0].load<1>(ym, dst_mip_level).x;
+    p += wyp * pressure_correction[0].load<1>(yp, dst_mip_level).x;
     p += wz_zm * p_zm;
     p += wz_zp * p_zp;
 
-    p -= divergence.load(cell, dst_mip_level);
+    p -= divergence.load<1>(cell, dst_mip_level).x;
 
     // a cell fully walled in by terrain has every weight collapse to 0 --
     // fall back to holding its current value rather than dividing by 0
@@ -247,45 +242,45 @@ void step(uint3 thread: SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void resample(uint3 thread: SV_DispatchThreadID)
 {
-    uint dst_res = velocity.resolution >> dst_mip_level;
-    if (any(thread.xy >= dst_res) || thread.z >= 6 * velocity.vertical_resolution)
+    CubeCoord cell = CubeCoord(thread.xy, thread.z % 6, thread.z / 6, 0);
+    if (!pressure_correction[0].bounds_check(cell, dst_mip_level))
         return;
+    
+    uint dst_res = pressure_correction[0].resolution >> dst_mip_level;
 
-    uint3 cell = thread;
-    float3 dir = cube_uvw_to_dir(float3((float2(cell.xy) + 0.5) / dst_res, cell.z));
+    float3 dir = cube_uvw_to_dir(float3((float2(cell.texel) + 0.5) / dst_res, cell.face));
 
     // pass the cell's own layer through -- omitting it would silently
     // default to layer 0, scrambling every other layer's multires solve
-    pressure_correction[1].store(cell, pressure_correction[0].sample_layer(dir, src_mip_level, cell.z / 6), dst_mip_level);
+    pressure_correction[1].store(cell, pressure_correction[0].sample_layer<1>(dir, 0, cell.layer, src_mip_level), dst_mip_level);
 }
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void apply(uint3 thread: SV_DispatchThreadID)
 {
-    if (any(thread.xy >= velocity.resolution) || thread.z >= 6 * velocity.vertical_resolution)
+    CubeCoord cell = CubeCoord(thread.xy, thread.z % 6, thread.z / 6, 0);
+    if (!velocity.bounds_check(cell))
         return;
 
-    uint3 cell = thread;
+    CubeCoord xm = pressure_correction[0].get_neighbor(cell, int2(-1, 0));
+    CubeCoord xp = pressure_correction[0].get_neighbor(cell, int2( 1, 0));
+    CubeCoord ym = pressure_correction[0].get_neighbor(cell, int2( 0,-1));
+    CubeCoord yp = pressure_correction[0].get_neighbor(cell, int2( 0, 1));
 
-    uint3 xm = pressure_correction[0].get_neighbor(cell, int2(-1, 0));
-    uint3 xp = pressure_correction[0].get_neighbor(cell, int2( 1, 0));
-    uint3 ym = pressure_correction[0].get_neighbor(cell, int2( 0,-1));
-    uint3 yp = pressure_correction[0].get_neighbor(cell, int2( 0, 1));
-
-    float px0 = pressure_correction[0].load(xm);
-    float px1 = pressure_correction[0].load(xp);
-    float py0 = pressure_correction[0].load(ym);
-    float py1 = pressure_correction[0].load(yp);
+    float px0 = pressure_correction[0].load<1>(xm);
+    float px1 = pressure_correction[0].load<1>(xp);
+    float py0 = pressure_correction[0].load<1>(ym);
+    float py1 = pressure_correction[0].load<1>(yp);
 
     // same non-uniform central difference as compute_divergence, so the
     // gradient removed here matches the spacing the divergence/Laplacian
     // were computed with
-    float3 dir    = cube_uvw_to_dir(float3(float2(cell.xy + 0.5) / velocity.resolution, cell.z));
-    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.xy + 0.5) / velocity.resolution, xm.z));
-    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.xy + 0.5) / velocity.resolution, xp.z));
-    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.xy + 0.5) / velocity.resolution, ym.z));
-    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.xy + 0.5) / velocity.resolution, yp.z));
+    float3 dir    = cube_uvw_to_dir(float3(float2(cell.texel + 0.5) / velocity.resolution, cell.face));
+    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.texel + 0.5) / velocity.resolution, xm.face));
+    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.texel + 0.5) / velocity.resolution, xp.face));
+    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.texel + 0.5) / velocity.resolution, ym.face));
+    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.texel + 0.5) / velocity.resolution, yp.face));
     float dist_xm = sphere_geodesic_distance(dir, dir_xm);
     float dist_xp = sphere_geodesic_distance(dir, dir_xp);
     float dist_ym = sphere_geodesic_distance(dir, dir_ym);
@@ -294,14 +289,13 @@ void apply(uint3 thread: SV_DispatchThreadID)
     // vertical pressure gradient, same Neumann (copy-of-center) ghost as
     // the Jacobi step above
     float dr = velocity.thickness / velocity.vertical_resolution;
-    uint layer = cell.z / 6;
-    float r = 1.0 + dr * (layer + 0.5);
-    uint3 zm_cell, zp_cell;
+    float r = 1.0 + dr * (cell.layer + 0.5);
+    CubeCoord zm_cell, zp_cell;
     bool zm_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, zm_cell);
     bool zp_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, zp_cell);
-    float p_center = pressure_correction[0].load(cell);
-    float p_zm = zm_ok ? pressure_correction[0].load(zm_cell) : p_center;
-    float p_zp = zp_ok ? pressure_correction[0].load(zp_cell) : p_center;
+    float p_center = pressure_correction[0].load<1>(cell);
+    float p_zm = zm_ok ? pressure_correction[0].load<1>(zm_cell) : p_center;
+    float p_zp = zp_ok ? pressure_correction[0].load<1>(zp_cell) : p_center;
 
     // sub-grid terrain porosity (see compute_divergence): a blocked face
     // falls back to the Neumann (copy-of-center) ghost instead of the real
@@ -309,8 +303,8 @@ void apply(uint3 thread: SV_DispatchThreadID)
     // already get -- so the pressure force doesn't accelerate fluid through
     // a face that's (partially) rock
     float mip = heightmap_mip_level(velocity.resolution);
-    bool self_is_bottom = layer == 0;
-    bool below_is_bottom = zm_ok && layer == 1;
+    bool self_is_bottom = cell.layer == 0;
+    bool below_is_bottom = zm_ok && cell.layer == 1;
     float open_self = open_fraction(dir, r, mip, self_is_bottom);
     float open_xm = min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
     float open_xp = min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));

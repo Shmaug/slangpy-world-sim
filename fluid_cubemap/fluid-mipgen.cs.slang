@@ -3,6 +3,16 @@ import SphericalField;
 SphericalScalarField field;
 uint dst_mip;
 
+void generate<int N>(uint3 thread, uint channel)
+{
+    vector<float, N> s = 0;
+    s += field.load<N>(CubeCoord(thread.xy * 2 + uint2(0, 0), thread.z % 6, thread.z / 6, channel), dst_mip - 1);
+    s += field.load<N>(CubeCoord(thread.xy * 2 + uint2(1, 0), thread.z % 6, thread.z / 6, channel), dst_mip - 1);
+    s += field.load<N>(CubeCoord(thread.xy * 2 + uint2(0, 1), thread.z % 6, thread.z / 6, channel), dst_mip - 1);
+    s += field.load<N>(CubeCoord(thread.xy * 2 + uint2(1, 1), thread.z % 6, thread.z / 6, channel), dst_mip - 1);
+    field.store<N>(CubeCoord(thread.xy, thread.z % 6, thread.z / 6, channel), 0.25 * s, dst_mip);
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void generate_mip(uint3 thread: SV_DispatchThreadID)
@@ -11,10 +21,24 @@ void generate_mip(uint3 thread: SV_DispatchThreadID)
     if (any(thread.xy >= res) || thread.z >= 6 * field.vertical_resolution)
         return;
 
-    float f00 = field.load(uint3(thread.xy * 2 + uint2(0, 0), thread.z), dst_mip - 1);
-    float f10 = field.load(uint3(thread.xy * 2 + uint2(1, 0), thread.z), dst_mip - 1);
-    float f01 = field.load(uint3(thread.xy * 2 + uint2(0, 1), thread.z), dst_mip - 1);
-    float f11 = field.load(uint3(thread.xy * 2 + uint2(1, 1), thread.z), dst_mip - 1);
-
-    field.store(thread, 0.25 * (f00 + f10 + f01 + f11), dst_mip);
+    for (uint channel = 0; channel < field.channels; channel += 4)
+    {
+        uint c_left = field.channels - channel;
+        if (c_left >= 4)
+        {
+            generate<4>(thread, channel);
+        }
+        else if (c_left == 3)
+        {
+            generate<3>(thread, channel);
+        }
+        else if (c_left == 2)
+        {
+            generate<2>(thread, channel);
+        }
+        else if (c_left == 1)
+        {
+            generate<1>(thread, channel);
+        }        
+    }
 }

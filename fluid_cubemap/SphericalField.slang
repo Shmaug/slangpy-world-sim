@@ -69,22 +69,22 @@ float3 cube_uvw_to_dir(float3 uvw)
     return normalize(dir);
 }
 
-uint flatten_cube_texel(uint3 texel, uint resolution, uint vertical_resolution, uint mip = 0)
+struct CubeCoord
 {
-    uint cube_face = texel.z % 6;
-    uint vertical_layer = texel.z / 6;
+    int2 texel;
+    int face;
+    int layer;
+    int channel;
+}
 
+uint flatten_cube_texel(CubeCoord coord, uint resolution, uint vertical_resolution, uint channels, uint mip = 0)
+{
     uint mip_offset = 0;
     for (uint i = 0; i < mip; i++)
-        mip_offset += (resolution >> i) * (resolution >> i) * 6 * vertical_resolution;
+        mip_offset += (resolution >> i) * (resolution >> i) * 6 * vertical_resolution * channels;
+
     uint mip_res = resolution >> mip;
-    #if 0
-    uint face_offset = cube_face * mip_res * mip_res * vertical_resolution;
-    uint texel_index = morton2d(texel.xy) * vertical_resolution + vertical_layer;
-    return mip_offset + face_offset + texel_index;
-    #else
-    return mip_offset + texel.z * mip_res * mip_res + morton2d(texel.xy);
-    #endif
+    return mip_offset + channels * ((mip_res * mip_res) * (6 * coord.layer + coord.face) + morton2d(coord.texel)) + coord.channel;
 }
 
 // steps `cell` one layer up/down (same face); returns false at a closed
@@ -93,35 +93,34 @@ uint flatten_cube_texel(uint3 texel, uint resolution, uint vertical_resolution, 
 // solid-wall ghost value appropriate to the field (sign-flip for the
 // wall-normal velocity component, same-value copy for a Neumann scalar
 // like pressure/divergence)
-bool vertical_neighbor(uint3 cell, int dz, uint vertical_resolution, out uint3 neighbor)
+bool vertical_neighbor(CubeCoord cell, int dz, uint vertical_resolution, out CubeCoord neighbor)
 {
-    int layer = int(cell.z / 6) + dz;
-    if (layer < 0 || layer >= int(vertical_resolution))
-    {
-        neighbor = cell;
-        return false;
-    }
-    neighbor = uint3(cell.xy, cell.z % 6 + 6 * uint(layer));
-    return true;
+    neighbor = cell;
+    neighbor.layer = cell.layer + dz;
+    return neighbor.layer >= 0 && neighbor.layer < int(vertical_resolution);
 }
 
 // texel index of `cell` offset by one texel along the face's u/v axes,
 // stepping onto the neighboring face (with the correct rotated uv) when
 // the offset crosses a face edge
-uint3 cube_neighbor_texel(uint3 cell, int2 offset, uint resolution)
+CubeCoord cube_neighbor_texel(CubeCoord cell, int2 offset, uint resolution)
 {
-    int2 n = int2(cell.xy) + offset;
-    if (all(n >= 0) && all(n < int(resolution)))
-        return uint3(n, cell.z);
+    CubeCoord neighbor = cell;
+    neighbor.texel = int2(cell.texel) + offset;
+    if (all(neighbor.texel >= 0) && all(neighbor.texel < int(resolution)))
+    {
+        return neighbor;
+    }
 
     // extend this face's uv plane past its [0,1) range; cube_uvw_to_dir's
     // per-face mapping is just a plane parameterization, so it stays valid
     // beyond the face bounds, and dir_to_cube_uvw then reclassifies the
     // resulting direction onto the correct neighboring face
-    float3 dir = cube_uvw_to_dir(float3((float2(cell.xy) + 0.5 + offset) / float(resolution), cell.z));
+    float3 dir = cube_uvw_to_dir(float3((float2(cell.texel) + 0.5 + offset) / float(resolution), cell.face));
     float3 uvw = dir_to_cube_uvw(dir);
-    uint2 wrapped = uint2(clamp(int2(uvw.xy * resolution), 0, int(resolution) - 1));
-    return uint3(wrapped, uint(uvw.z) + 6*(cell.z/6));
+    neighbor.texel = int2(clamp(int2(uvw.xy * resolution), 0, int(resolution) - 1));
+    neighbor.face = int(uvw.z);
+    return neighbor;
 }
 
 struct CubeMapTangentFrame
@@ -166,12 +165,13 @@ struct CubeMapTangentFrame
 
 struct SphericalScalarField
 {
-    RWStructuredBuffer<float> data;
+    RWByteAddressBuffer data;
     float radius;
     float thickness; // height above 1 of the simulation
     float scale_height; // scale height where average density is found
     uint resolution;
     uint vertical_resolution;
+    uint channels;
 
     // atmosphere density at physical radius `r` (in [1, 1+thickness]),
     // normalized to 1 at the surface r=1
@@ -180,32 +180,34 @@ struct SphericalScalarField
         return exp(-(r - radius) / scale_height);
     }
 
-    uint flatten_index(uint3 texel, uint mip = 0)
+    uint flatten_index(CubeCoord coord, uint mip = 0)
     {
-        return flatten_cube_texel(texel, resolution, vertical_resolution, mip);
+        return flatten_cube_texel(coord, resolution, vertical_resolution, channels, mip);
     }
 
-    bool bounds_check(int3 texel)
+    bool bounds_check(CubeCoord coord, uint mip = 0)
     {
-        return all(texel >= 0) && all(texel.xy < resolution) && texel.z < 6 * vertical_resolution;
+        return all(coord.texel >= 0) && all(coord.texel < resolution) && coord.face >= 0 && coord.face < 6 && coord.layer >= 0 && coord.layer < vertical_resolution && coord.channel < channels;
     }
 
-    float load(int3 texel, uint mip = 0)
+    // requires N <= channels
+    vector<float,N> load<int N>(CubeCoord coord, uint mip = 0)
     {
-        return bounds_check(texel) ? data[flatten_index(texel, mip)] : 0;
+        return bounds_check(coord) ? data.Load<vector<float, N>>(sizeof(float) * flatten_index(coord, mip)) : 0;
     }
-    void store(int3 texel, float value, uint mip = 0)
+    // requires N <= channels
+    void store<int N>(CubeCoord coord, vector<float, N> value, uint mip = 0)
     {
-        if (bounds_check(texel))
-            data[flatten_index(texel, mip)] = value;
-    }
-
-    uint3 get_neighbor(uint3 texel, int2 offset, uint mip = 0)
-    {
-        return cube_neighbor_texel(texel, offset, resolution >> mip);
+        if (bounds_check(coord))
+            data.Store<vector<float, N>>(sizeof(float) * flatten_index(coord, mip), value);
     }
 
-    float sample_layer(float3 dir, uint mip, uint vertical_layer)
+    CubeCoord get_neighbor(CubeCoord coord, int2 offset, uint mip = 0)
+    {
+        return cube_neighbor_texel(coord, offset, resolution >> mip);
+    }
+
+    vector<float,N> sample_layer<int N>(float3 dir, uint channel, uint vertical_layer, uint mip)
     {
         uint mip_res = resolution >> mip;
         float3 cube_uvw = dir_to_cube_uvw(dir);
@@ -222,51 +224,47 @@ struct SphericalScalarField
         int2 off = int2(frac_uv.x < 0.5 ? -1 : 0, frac_uv.y < 0.5 ? -1 : 0);
         float2 frac = frac_uv - 0.5 - float2(off);
 
-        uint3 home_cell = uint3(uint2(home), uint(cube_uvw.z) + 6 * vertical_layer);
-        float s00 = load(get_neighbor(home_cell, off + int2(0, 0), mip), mip);
-        float s10 = load(get_neighbor(home_cell, off + int2(1, 0), mip), mip);
-        float s01 = load(get_neighbor(home_cell, off + int2(0, 1), mip), mip);
-        float s11 = load(get_neighbor(home_cell, off + int2(1, 1), mip), mip);
+        CubeCoord home_cell = CubeCoord(uint2(home), uint(cube_uvw.z), vertical_layer, channel);
+        let s00 = load<N>(get_neighbor(home_cell, off + int2(0, 0), mip), mip);
+        let s10 = load<N>(get_neighbor(home_cell, off + int2(1, 0), mip), mip);
+        let s01 = load<N>(get_neighbor(home_cell, off + int2(0, 1), mip), mip);
+        let s11 = load<N>(get_neighbor(home_cell, off + int2(1, 1), mip), mip);
 
         return lerp(lerp(s00, s10, frac.x), lerp(s01, s11, frac.x), frac.y);
     }
 
-    float sample(float3 dir, float vertical_layer, uint mip)
+    vector<float,N> sample<int N>(float3 dir, uint channel, float vertical_layer, uint mip)
     {
         float layer_clamped = clamp(vertical_layer, 0, float(vertical_resolution - 1));
         uint layer_lo = uint(floor(layer_clamped));
         uint layer_hi = min(layer_lo + 1, vertical_resolution - 1);
         float t = layer_clamped - float(layer_lo);
-        return lerp(sample_layer(dir, mip, layer_lo), sample_layer(dir, mip, layer_hi), t);
+        return lerp(sample_layer<N>(dir, channel, layer_lo, mip), sample_layer<N>(dir, channel, layer_hi, mip), t);
     }
 
     // 3d sampling, vertical_layer extracted from length(pos)
-    float sample(float3 pos, uint mip)
+    vector<float,N> sample<int N>(float3 pos, uint channel, uint mip)
     {
         float h = length(pos);
         float3 dir = pos / h;
         float vertical_layer = vertical_resolution * ((h - radius) / thickness);
-        return sample(dir, vertical_layer, mip);
+        return sample<N>(dir, channel, vertical_layer, mip);
     }
 
-    float sample_layer_nearest(float3 dir, uint mip, uint vertical_layer)
+    vector<float,N> sample_layer_nearest<int N>(float3 dir, uint channel, uint vertical_layer, uint mip)
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
-        int2 texel = clamp(int2(cube_uvw.xy * (resolution>>mip)), 0, int(resolution>>mip) - 1);
-        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
-        return load(cell);
+        int2 texel = clamp(int2(cube_uvw.xy * (resolution >> mip)), 0, int(resolution >> mip) - 1);
+        CubeCoord cell = CubeCoord(uint2(texel), uint(cube_uvw.z), uint(vertical_layer), channel);
+        return load<N>(cell);
     }
 
-    float sample_nearest(float3 pos, uint mip)
+    vector<float,N> sample_nearest<int N>(float3 pos, uint channel, uint mip)
     {
         float h = length(pos);
         float3 dir = pos / h;
         float vertical_layer = vertical_resolution * ((h - radius) / thickness);
-        uint mip_res = resolution >> mip;
-        float3 cube_uvw = dir_to_cube_uvw(dir);
-        int2 texel = clamp(int2(cube_uvw.xy * mip_res), 0, int(mip_res) - 1);
-        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
-        return load(cell, mip);
+        return sample_layer_nearest<N>(dir, channel, uint(vertical_layer), mip);
     }
 }
 
@@ -289,29 +287,29 @@ struct SphericalVelocityField
         return exp(-max(0, r - radius) / scale_height);
     }
 
-    uint flatten_index(uint3 texel, uint mip = 0)
+    uint flatten_index(CubeCoord coord)
     {
-        return flatten_cube_texel(texel, resolution, vertical_resolution, mip);
+        return flatten_cube_texel(coord, resolution, vertical_resolution, 1, 0);
     }
 
-    bool bounds_check(int3 texel)
+    bool bounds_check(CubeCoord coord)
     {
-        return all(texel >= 0) && all(texel.xy < resolution) && texel.z < vertical_resolution * 6;
+        return all(coord.texel >= 0) && all(coord.texel < resolution) && coord.face >= 0 && coord.face < 6 && coord.layer >= 0 && coord.layer < vertical_resolution && coord.channel == 0;
     }
 
-    float3 load(int3 texel, uint mip = 0)
+    float3 load(CubeCoord coord)
     {
-        return bounds_check(texel) ? data.Load<float3>(sizeof(float3) * flatten_index(texel, mip)) : 0;
+        return bounds_check(coord) ? data.Load<float3>(sizeof(float3) * flatten_index(coord)) : 0;
     }
-    void store(int3 texel, float3 value, uint mip = 0)
+    void store(CubeCoord coord, float3 value)
     {
-        if (bounds_check(texel))
-            data.Store<float3>(sizeof(float3) * flatten_index(texel, mip), value);
+        if (bounds_check(coord))
+            data.Store<float3>(sizeof(float3) * flatten_index(coord), value);
     }
 
-    uint3 get_neighbor(uint3 texel, int2 offset)
+    CubeCoord get_neighbor(CubeCoord coord, int2 offset)
     {
-        return cube_neighbor_texel(texel, offset, resolution);
+        return cube_neighbor_texel(coord, offset, resolution);
     }
 
     float3 to_local(float3 dir, float3 vel)
@@ -319,15 +317,15 @@ struct SphericalVelocityField
         return CubeMapTangentFrame(dir).to_local3(vel);
     }
 
-    float3 load_world_space(uint3 texel)
+    float3 load_world_space(CubeCoord coord)
     {
-        float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        return CubeMapTangentFrame(dir).to_world(load(texel));
+        float3 dir = cube_uvw_to_dir(float3((coord.texel + 0.5) / resolution, coord.face));
+        return CubeMapTangentFrame(dir).to_world(load(coord));
     }
-    float3 load_world_space(uint3 texel, float3 dst_dir)
+    float3 load_world_space(CubeCoord coord, float3 dst_dir)
     {
-        float3 dir = cube_uvw_to_dir(float3((texel.xy + 0.5) / resolution, texel.z));
-        float3 vel = CubeMapTangentFrame(dir).to_world(load(texel));
+        float3 dir = cube_uvw_to_dir(float3((coord.texel + 0.5) / resolution, coord.face));
+        float3 vel = CubeMapTangentFrame(dir).to_world(load(coord));
         return sphere_parallel_transport(dir, dst_dir, vel);
     }
 
@@ -347,7 +345,7 @@ struct SphericalVelocityField
         int2 off = int2(frac_uv.x < 0.5 ? -1 : 0, frac_uv.y < 0.5 ? -1 : 0);
         float2 frac = frac_uv - 0.5 - float2(off);
 
-        uint3 home_cell = uint3(uint2(home), uint(cube_uvw.z) + 6 * vertical_layer);
+        CubeCoord home_cell = CubeCoord(uint2(home), uint(cube_uvw.z), vertical_layer, 0);
 
         float3 s00 = load_world_space(get_neighbor(home_cell, off + int2(0, 0)), dir);
         float3 s10 = load_world_space(get_neighbor(home_cell, off + int2(1, 0)), dir);
@@ -379,7 +377,7 @@ struct SphericalVelocityField
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
         int2 texel = clamp(int2(cube_uvw.xy * resolution), 0, int(resolution) - 1);
-        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
+        CubeCoord cell = CubeCoord(texel, uint(cube_uvw.z), vertical_layer, 0);
         return load_world_space(cell, dir);
     }
 
@@ -388,9 +386,6 @@ struct SphericalVelocityField
         float h = length(pos);
         float3 dir = pos / h;
         float vertical_layer = vertical_resolution * ((h - radius) / thickness);
-        float3 cube_uvw = dir_to_cube_uvw(dir);
-        int2 texel = clamp(int2(cube_uvw.xy * resolution), 0, int(resolution) - 1);
-        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
-        return load_world_space(cell, dir);
+        return sample_layer_nearest(dir, uint(vertical_layer));
     }
 }
