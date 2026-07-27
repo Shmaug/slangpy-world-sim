@@ -1,7 +1,10 @@
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), os.pardir))
 import slangpy as spy
 import numpy as np
 from Camera import Camera, InputState
+from fluid_cubemap.CubeFluidSimulator import CubeFluidSimulator
 
 COLOR_FORMAT = spy.Format.rgba32_float
 DEPTH_FORMAT = spy.Format.d32_float
@@ -11,9 +14,26 @@ def get_asset_path(path):
         return path
     return os.path.join(os.path.dirname(__file__), path)
 
+def intersect_sphere(origin:spy.float3, direction:spy.float3, radius:float) -> spy.float2|None:
+    # precise version
+    r2 = radius * radius
+    DD = spy.math.dot(direction, direction)
+    Df = spy.math.dot(origin, direction)
+    DD2 = DD*DD
+    l = DD * origin - direction*Df
+    a2_r2 = DD2*r2
+    ll = spy.math.dot(l,l)
+    if a2_r2 < ll:
+        return None
+    det = a2_r2 - ll
+    rcp_a = 1.0 / DD
+    det = spy.math.sqrt(det * rcp_a)    
+    return (-Df + spy.float2(-det, det)) * rcp_a
+
 class WorldRenderer:
-    def __init__(self, device : spy.Device):
+    def __init__(self, device : spy.Device, widget:spy.ui.Widget, input_state:InputState):
         self.device = device
+        self.input_state = input_state
         self.texture_loader = spy.TextureLoader(self.device)
             
         def load_single_channel(path, channel, usage):
@@ -26,7 +46,8 @@ class WorldRenderer:
 
         self.surface_albedo_texture = self.texture_loader.load_texture(get_asset_path("earth_albedo.png"), options=spy.TextureLoader.Options({ "allocate_mips": False, "load_as_srgb": True }))
         self.surface_height_texture = load_single_channel(get_asset_path("earth_height.png"), 0, spy.TextureUsage.shader_resource)
-        self.cloud_texture  = load_single_channel(get_asset_path("earth_clouds.png"), 3, spy.TextureUsage.shader_resource)
+
+        self.atmosphere_sim = CubeFluidSimulator(device)
 
         self.render_pipeline = self.device.create_render_pipeline(
             program=self.device.load_program(get_asset_path("render-sphere.3d.slang"), entry_point_names=["vs", "fs"]),
@@ -56,24 +77,67 @@ class WorldRenderer:
         self.sphere_resolution = 64
         self.frame_seed = 0
 
-    def setup_ui(self, window):        
-        self.planet_radius              = spy.ui.DragFloat   (window, "Planet radius (km)",           value=6371,                              min=0)
-        self.terrain_height             = spy.ui.DragFloat   (window, "Terrain height (km)",          value=6.4,                               min=0)
-        self.cloud_height               = spy.ui.DragFloat2  (window, "Cloud height range (km)",      value=spy.float2(2,10),                  min=0)
-        self.surface_rotation           = spy.ui.SliderFloat (window, "Surface rotation",             value=0.0,                               min=0, max=1)
-        self.cloud_rotation             = spy.ui.SliderFloat (window, "Cloud rotation",               value=0.0,                               min=0, max=1)
-        self.cloud_density              = spy.ui.DragFloat   (window, "Cloud density",                value=50.0,                              min=0)
-        
-        self.atmosphere_height          = spy.ui.DragFloat   (window, "Atmosphere height (km)",       value=100,                               min=0)
-        self.atmosphere_rayleigh_height = spy.ui.DragFloat   (window, "Rayleigh scatter height (km)", value=4,                                 min=0, speed=0.01)
-        self.atmosphere_mie_height      = spy.ui.DragFloat   (window, "Mie scatter height (km)",      value=0.6,                               min=0, speed=0.01)
-        self.atmosphere_rayleigh_color  = spy.ui.DragFloat3  (window, "Rayleigh scatter factor",      value=spy.float3(6.605, 12.344, 29.412), min=0, speed=0.01)
-        self.atmosphere_mie_color       = spy.ui.DragFloat   (window, "Mie scatter factor",           value=3.996,                             min=0, speed=0.01)
-        self.atmosphere_density         = spy.ui.DragFloat   (window, "Atmosphere density",           value=1,                                 min=0, speed=0.01)
+        def reset_cb():
+            self.atmosphere_sim.reset = True
+        def update_cb(value):
+            self.atmosphere_sim.resolution = 1 << self.cloud_resolution.value
+            self.atmosphere_sim.vertical_resolution = self.cloud_vertical_resolution.value
+            self.atmosphere_sim.radius = 1.0
+            self.atmosphere_sim.thickness = self.cloud_height.value / self.planet_radius.value
+            self.atmosphere_sim.density_scale_height = 1 / max(1e-9, self.atmosphere_rayleigh_height.value / self.planet_radius.value)
+            self.atmosphere_sim.solver_iterations = self.solver_iterations.value
+            self.atmosphere_sim.solver_fine_iterations = self.solver_fine_iterations.value
+            self.atmosphere_sim.multires_solve = self.solver_multires.value
+            self.atmosphere_sim.preserve_smoke = True
+            self.atmosphere_sim._create_buffers()
 
-        self.sun_color                  = spy.ui.SliderFloat3(window, "Sun color",                    value=spy.float3(1,1,1),                 min=0, max=1)
-        self.sun_strength               = spy.ui.DragFloat   (window, "Sun strength",                 value=10,                                min=0, speed=0.1)
-        self.sun_direction              = spy.ui.SliderFloat3(window, "Sun direction",                value=spy.float3(0,0,1),                 min=-1, max=1)
+        self.planet_radius              = spy.ui.DragFloat   (widget, "Planet radius (km)",           value=6371,                              min=0, callback=update_cb)
+        self.terrain_height             = spy.ui.DragFloat   (widget, "Terrain height (km)",          value=6.4,                               min=0)
+        self.surface_rotation           = spy.ui.SliderFloat (widget, "Surface rotation",             value=0.0,                               min=0, max=1)
+        
+        self.atmosphere_height          = spy.ui.DragFloat   (widget, "Atmosphere height (km)",       value=100,                               min=0, callback=update_cb)
+        self.cloud_height               = spy.ui.DragFloat   (widget, "Cloud height (km)",            value=10,                                min=0, callback=update_cb)
+        self.atmosphere_rayleigh_height = spy.ui.DragFloat   (widget, "Rayleigh scatter height (km)", value=4,                                 min=0, speed=0.01, callback=update_cb)
+        self.atmosphere_mie_height      = spy.ui.DragFloat   (widget, "Mie scatter height (km)",      value=0.6,                               min=0, speed=0.01)
+        self.atmosphere_rayleigh_color  = spy.ui.DragFloat3  (widget, "Rayleigh scatter factor",      value=spy.float3(6.605, 12.344, 29.412), min=0, speed=0.01)
+        self.atmosphere_mie_color       = spy.ui.DragFloat   (widget, "Mie scatter factor",           value=3.996,                             min=0, speed=0.01)
+        self.atmosphere_density         = spy.ui.DragFloat   (widget, "Atmosphere density",           value=1,                                 min=0, speed=0.01)
+        self.cloud_density              = spy.ui.DragFloat   (widget, "Cloud density",                value=50.0,                              min=0)
+
+        self.sun_color                  = spy.ui.SliderFloat3(widget, "Sun color",                    value=spy.float3(1,1,1),                 min=0, max=1)
+        self.sun_strength               = spy.ui.DragFloat   (widget, "Sun strength",                 value=10,                                min=0, speed=0.1)
+        self.sun_direction              = spy.ui.SliderFloat3(widget, "Sun direction",                value=spy.float3(0,0,1),                 min=-1, max=1)
+
+        group = spy.ui.Group(widget, "Cloud simulation")
+        spy.ui.Button(group, "Reset sim", reset_cb)
+        self.cloud_dt = spy.ui.DragFloat(group, "Timestep", 1.0/60.0, speed=1/120.0)
+        self.cloud_resolution = spy.ui.DragInt(group, "Resolution (log2)", 9, min=0, max=12, callback=update_cb)
+        self.cloud_vertical_resolution = spy.ui.DragInt(group, "Vertical resolution", 4, min=1, max=16, callback=update_cb)
+        self.solver_iterations = spy.ui.DragInt(group, "Solver iterations", 10, callback=update_cb)
+        self.solver_multires = spy.ui.CheckBox(group, "Multiresolution Solver", value=True, callback=update_cb)
+        self.solver_fine_iterations = spy.ui.DragInt(group, "Multiresolution sub-iterations", 4, callback=update_cb)
+        update_cb(None)
+
+        self.emit_drag_kernel = self.device.create_compute_kernel(self.device.load_program("spawn-clouds.cs.slang", ["emit_drag"]))
+        self.emit_radius = spy.ui.DragFloat(widget, "Emit radius", value=2, speed=0.01)
+        self.emit_speed = spy.ui.DragFloat(widget, "Emit speed", value=1, speed=0.01)
+        self.emit_vertical_speed = spy.ui.DragFloat(widget, "Emit vertical speed", value=0.1, speed=0.01)
+        self.drag:list[spy.float3] = []
+        def emit_drag(smoke,velocity,command_encoder):
+            if len(self.drag) > 1:
+                self.emit_drag_kernel.dispatch(
+                    self.atmosphere_sim.dispatch_dim(),
+                    {
+                        "smoke": smoke,
+                        "velocity": velocity,
+                        "start_dir": self.drag[-2],
+                        "end_dir": self.drag[-1],
+                        "radius": spy.math.radians(self.emit_radius.value),
+                        "speed": self.emit_speed.value,
+                        "vertical_speed": self.emit_vertical_speed.value,
+                    },
+                    command_encoder)
+        self.atmosphere_sim.emitters.append(emit_drag)
 
     def render(self,
                command_encoder : spy.CommandEncoder,
@@ -83,6 +147,29 @@ class WorldRenderer:
                render_texture_view : spy.TextureView,
                depth_texture_view : spy.TextureView
                ):
+        camera_to_world = camera.camera_to_world()
+        view = spy.math.inverse(camera_to_world)
+        projection = camera.projection(render_width / render_height)
+        view_projection = spy.math.mul(projection, view)
+        inv_view_projection = spy.math.inverse(view_projection)
+
+        mouse_pos = self.input_state.get("mouse")
+        if mouse_pos is not None:
+            if self.input_state.get(spy.MouseButton.right):
+                clip_pos = 2 * (mouse_pos / spy.float2(render_width, render_height)) - 1
+                clip_pos.y = -clip_pos.y
+                ray_direction = spy.math.normalize(spy.math.mul(inv_view_projection, spy.float4(clip_pos.x, clip_pos.y, 1, 1)).xyz)
+                hit = intersect_sphere(camera.position, ray_direction, 1.0)
+                if hit is not None and hit.x > 0:
+                    self.drag.append(spy.math.normalize(camera.position + ray_direction * hit.x))
+                else:
+                    self.drag.clear()
+            else:
+                self.drag.clear()
+            
+        self.atmosphere_sim.step(command_encoder, self.cloud_dt.value)
+        self.prev_mouse_pos = mouse_pos
+
         with command_encoder.begin_render_pass(spy.RenderPassDesc({
             "color_attachments": [ spy.RenderPassColorAttachment({
                 "view": render_texture_view,
@@ -103,25 +190,19 @@ class WorldRenderer:
                 "scissor_rects": [ spy.ScissorRect.from_size(render_width, render_height) ],
             })
 
-            camera_to_world = camera.camera_to_world()
-            view = spy.math.inverse(camera_to_world)
-            projection = camera.projection(render_width / render_height)
-
             cursor = spy.ShaderCursor(shader)
             cursor["planet_albedo"]              = self.surface_albedo_texture
             cursor["planet_height"]              = self.surface_height_texture
-            cursor["planet_clouds"]              = self.cloud_texture
             cursor["sampler"]                    = self.texture_sampler
-            cursor["view_projection"]            = spy.math.mul(projection, view)
+            cursor["planet_clouds"]              = self.atmosphere_sim.smoke_field()
+            cursor["view_projection"]            = view_projection
             cursor["camera_position"]            = spy.math.transform_point(camera_to_world, spy.float3(0,0,0))
             cursor["sphere_resolution"]          = self.sphere_resolution
             cursor["sun_emission"]               = self.sun_color.value * self.sun_strength.value
             cursor["cloud_density"]              = self.cloud_density.value
             cursor["sun_direction"]              = spy.math.normalize(self.sun_direction.value)
-            cursor["cloud_height_range"]         = self.cloud_height.value / self.planet_radius.value
             cursor["terrain_height"]             = self.terrain_height.value / self.planet_radius.value
             cursor["surface_rotation"]           = self.surface_rotation.value
-            cursor["cloud_rotation"]             = self.cloud_rotation.value
             cursor["atmosphere_height"]          = self.atmosphere_height.value / self.planet_radius.value
             cursor["atmosphere_rayleigh_height"] = 1 / max(1e-9, self.atmosphere_rayleigh_height.value / self.planet_radius.value)
             cursor["atmosphere_mie_height"]      = 1 / max(1e-9, self.atmosphere_mie_height.value / self.planet_radius.value)
@@ -151,36 +232,28 @@ class App:
         self.window.on_keyboard_event = self.on_keyboard_event
         self.window.on_mouse_event    = self.on_mouse_event
 
-        self.ui = spy.ui.Context(self.device)
-
         self.pause = False
         self.minimized = False
         self.input_state = InputState()
         self.render_texture = None
         self.fps_avg = 0
 
-        self.renderer   = WorldRenderer(self.device)
-        self.camera = Camera()
+        self.tonemapper = self.device.create_compute_kernel(self.device.load_program(get_asset_path("tonemap.cs.slang"), ["tonemap"]))        
 
-        self.tonemapper = self.device.create_compute_kernel(self.device.load_program(get_asset_path("tonemap.cs.slang"), ["tonemap"]))
+        self.ui = spy.ui.Context(self.device)
 
-        self.setup_ui()
-
-    def setup_ui(self):
-        screen = self.ui.screen
-        window = spy.ui.Window(screen, "Settings", size=spy.float2(500, 300))
-
-        self.fps_text = spy.ui.Text(window, "FPS: 0")
-        
+        widget = spy.ui.Window(self.ui.screen, "Settings", size=spy.float2(500, 300))
+        self.fps_text = spy.ui.Text(widget, "FPS: 0")
         def pause_callback():
             self.pause = not self.pause
             self.pause_button.label = "Resume rendering" if self.pause else "Pause rendering"
-        self.pause_button = spy.ui.Button(window, "Pause rendering", callback=pause_callback)
+        self.pause_button = spy.ui.Button(widget, "Pause rendering", callback=pause_callback)
 
-        self.camera_pos_text = spy.ui.Text(window, "Camera: 0")
-        self.exposure = spy.ui.SliderFloat(window, "Exposure", value=0.0, min=-12, max=12)
+        self.camera_pos_text = spy.ui.Text(widget, "Camera: 0")
+        self.exposure = spy.ui.SliderFloat(widget, "Exposure", value=0.0, min=-12, max=12)
         
-        self.renderer.setup_ui(spy.ui.Group(window, label="Renderer"))
+        self.renderer = WorldRenderer(self.device, spy.ui.Group(widget, label="Renderer"), self.input_state)
+        self.camera = Camera()
 
     def on_resize(self, width: int, height: int):
         self.device.wait()

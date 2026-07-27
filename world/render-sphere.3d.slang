@@ -1,5 +1,6 @@
 import Math;
 import RNG;
+import SphericalField;
 
 struct VertexOutput
 {
@@ -9,7 +10,7 @@ struct VertexOutput
 
 Texture2D<float4> planet_albedo;
 Texture2D<float>  planet_height;
-Texture2D<float>  planet_clouds;
+uniform SphericalScalarField planet_clouds;
 SamplerState sampler;
 
 uniform float4x4 view_projection;
@@ -19,14 +20,12 @@ uniform float3   sun_emission;
 uniform float    cloud_density;
 uniform float3   sun_direction;
 uniform uint     frame_seed;
-uniform float2   cloud_height_range;
+uniform float3   atmosphere_rayleigh_color;
 uniform float    terrain_height;
 uniform float    surface_rotation;
-uniform float    cloud_rotation;
 uniform float    atmosphere_height;
 uniform float    atmosphere_rayleigh_height;
 uniform float    atmosphere_mie_height;
-uniform float3   atmosphere_rayleigh_color;
 uniform float    atmosphere_mie_color;
 uniform float    atmosphere_density;
 
@@ -40,8 +39,8 @@ void sample_atmosphere_density(float3 p, out float3 rayleigh, out float mie, out
     float len_p = length(p);
     float height = len_p - 1.0;
 
-    if (cloud_density > 0 && height >= cloud_height_range.x && height <= cloud_height_range.y)
-        cloud = cloud_density * planet_clouds.Sample(sampler, xyz_to_uv(p / len_p) + float2(cloud_rotation, 0));
+    if (cloud_density > 0 && height >= 0 && height <= planet_clouds.thickness)
+        cloud = cloud_density * planet_clouds.sample(p, 0);
     else
         cloud = 0;
     

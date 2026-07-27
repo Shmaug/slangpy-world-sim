@@ -79,6 +79,7 @@ class CubeFluidSimulator:
         else:
             self.smoke_amount_ui = None
             self.divergence_ui = None
+            self.paused = None
 
     def _create_buffers(self):
         total_texels = sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()))
@@ -156,7 +157,7 @@ class CubeFluidSimulator:
                 command_encoder.clear_buffer(t)
             self.reset = False
 
-        if self.paused.value and not self.step_once:
+        if self.paused is not None and self.paused.value and not self.step_once:
             return
         self.step_once = False
 

@@ -81,9 +81,9 @@ class App:
                 sin_lon = spy.math.sin(spy.math.radians(self.plume_location_ui.value.y))
                 cos_lon = spy.math.cos(spy.math.radians(self.plume_location_ui.value.y))
                 dir = spy.float3(
-                    cos_lat * cos_lon,
+                    cos_lat * sin_lon,
                     sin_lat,
-                    cos_lat * sin_lon
+                    cos_lat * cos_lon
                 )
                 
                 sin_azimuth = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.x))
@@ -91,8 +91,8 @@ class App:
                 sin_horizon = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.y))
                 cos_horizon = spy.math.cos(spy.math.radians(self.plume_direction_ui.value.y))
                 tangent_vel = spy.float3(
-                    cos_horizon * sin_azimuth,
                     cos_horizon * cos_azimuth,
+                    cos_horizon * sin_azimuth,
                     sin_horizon
                 )
                 tangent_vel.x *= self.plume_speed_ui.value

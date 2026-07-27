@@ -3,7 +3,7 @@ import math
 
 class InputState:
     def __init__(self):
-        self.state = {}
+        self.state : dict[str|spy.MouseButton|spy.KeyCode, spy.float2|float|bool] = {}
         
     def on_keyboard_event(self, event: spy.KeyboardEvent, has_focus):
         if has_focus and event.is_key_press(): self.state[event.key] = True
@@ -18,10 +18,10 @@ class InputState:
     def update(self):
         self.state["scroll"] = 0
 
-    def get(self, key):
+    def get(self, key:str|spy.MouseButton|spy.KeyCode):
         return self.state[key] if key in self.state else None
 
-    def is_down(self, key):
+    def is_down(self, key:str|spy.MouseButton|spy.KeyCode):
         return key in self.state and self.state[key]
 
 class Camera:
