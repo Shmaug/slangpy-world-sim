@@ -170,18 +170,22 @@ class CubeFluidSimulator:
             return self.smoke_field() | {"data": buf }
 
         def pressure_project_vars(dst_mip = 0, src_mip = 0):
-            return {
+            vars = {
                 "velocity": self.velocity_field(1),
                 "divergence": field_vars(self.divergence_buf),
                 "pressure_correction": [ field_vars(self.pressure_correction_buf[i]) for i in range(2) ],
                 "dst_mip_level": dst_mip,
                 "src_mip_level": src_mip,
-
-                "surface_height": self.heightmap,
-                "surface_height2": self.heightmap_sqr,
-                "linear_sampler": self.linear_sampler,
-                "terrain_height": self.terrain_height,
+                "terrain_height": 0,
             }
+            if self.heightmap is not None:
+                vars |= {
+                    "surface_height": self.heightmap,
+                    "surface_height2": self.heightmap_sqr,
+                    "linear_sampler": self.linear_sampler,
+                    "terrain_height": self.terrain_height,
+                }
+            return vars
         
         def dispatch(kernel, vars, mip = 0):
             kernel.dispatch(self.dispatch_dim(mip), vars, command_encoder)

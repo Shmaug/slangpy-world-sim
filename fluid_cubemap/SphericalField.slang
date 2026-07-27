@@ -77,12 +77,14 @@ uint flatten_cube_texel(uint3 texel, uint resolution, uint vertical_resolution, 
     uint mip_offset = 0;
     for (uint i = 0; i < mip; i++)
         mip_offset += (resolution >> i) * (resolution >> i) * 6 * vertical_resolution;
-
     uint mip_res = resolution >> mip;
+    #if 0
     uint face_offset = cube_face * mip_res * mip_res * vertical_resolution;
     uint texel_index = morton2d(texel.xy) * vertical_resolution + vertical_layer;
-
     return mip_offset + face_offset + texel_index;
+    #else
+    return mip_offset + texel.z * mip_res * mip_res + morton2d(texel.xy);
+    #endif
 }
 
 // steps `cell` one layer up/down (same face); returns false at a closed
