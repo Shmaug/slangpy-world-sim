@@ -58,6 +58,16 @@ float solid_fraction(float3 dir, float r, float mip)
     return 0;
 }
 
+// terrain only ever occupies the bottom-most fluid layer (layer 0, the one
+// touching r=1) -- `solid_fraction` itself has no notion of layers, so
+// callers gate it explicitly with `is_bottom` rather than letting a tall
+// `terrain_height` bleed rock into higher layers just because `r` still
+// falls below the mean terrain radius there
+float open_fraction(float3 dir, float r, float mip, bool is_bottom)
+{
+    return is_bottom ? 1.0 - solid_fraction(dir, r, mip) : 1.0;
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void compute_divergence(uint3 thread: SV_DispatchThreadID)
@@ -115,13 +125,15 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
     // crosses a ridge that only partially fills the cells it passes
     // through, rather than only reacting once a whole cell is submerged
     float mip = heightmap_mip_level(velocity.resolution);
-    float open_self = 1.0 - solid_fraction(dir, r, mip);
-    float open_xm = min(open_self, 1.0 - solid_fraction(dir_xm, r, mip));
-    float open_xp = min(open_self, 1.0 - solid_fraction(dir_xp, r, mip));
-    float open_ym = min(open_self, 1.0 - solid_fraction(dir_ym, r, mip));
-    float open_yp = min(open_self, 1.0 - solid_fraction(dir_yp, r, mip));
-    float open_zm = zm_ok ? min(open_self, 1.0 - solid_fraction(dir, r - dr, mip)) : 0.0;
-    float open_zp = zp_ok ? min(open_self, 1.0 - solid_fraction(dir, r + dr, mip)) : 0.0;
+    bool self_is_bottom = layer == 0;
+    bool below_is_bottom = zm_ok && layer == 1;
+    float open_self = open_fraction(dir, r, mip, self_is_bottom);
+    float open_xm = min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
+    float open_xp = min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
+    float open_ym = min(open_self, open_fraction(dir_ym, r, mip, self_is_bottom));
+    float open_yp = min(open_self, open_fraction(dir_yp, r, mip, self_is_bottom));
+    float open_zm = zm_ok ? min(open_self, open_fraction(dir, r - dr, mip, below_is_bottom)) : 0.0;
+    float open_zp = zp_ok ? open_self : 0.0;
 
     float vel_xm_eff = lerp(-vel_center.x, vel_xm, open_xm);
     float vel_xp_eff = lerp(-vel_center.x, vel_xp, open_xp);
@@ -205,13 +217,15 @@ void step(uint3 thread: SV_DispatchThreadID)
     // rather than needing an explicit ghost value -- zeroing its weight
     // already reproduces the zero-flux wall condition
     float mip = heightmap_mip_level(mip_res);
-    float open_self = 1.0 - solid_fraction(dir, r, mip);
-    wxm *= min(open_self, 1.0 - solid_fraction(dir_xm, r, mip));
-    wxp *= min(open_self, 1.0 - solid_fraction(dir_xp, r, mip));
-    wym *= min(open_self, 1.0 - solid_fraction(dir_ym, r, mip));
-    wyp *= min(open_self, 1.0 - solid_fraction(dir_yp, r, mip));
-    float wz_zm = zm_ok ? wz * min(open_self, 1.0 - solid_fraction(dir, r - dr, mip)) : 0.0;
-    float wz_zp = zp_ok ? wz * min(open_self, 1.0 - solid_fraction(dir, r + dr, mip)) : 0.0;
+    bool self_is_bottom = layer == 0;
+    bool below_is_bottom = zm_ok && layer == 1;
+    float open_self = open_fraction(dir, r, mip, self_is_bottom);
+    wxm *= min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
+    wxp *= min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
+    wym *= min(open_self, open_fraction(dir_ym, r, mip, self_is_bottom));
+    wyp *= min(open_self, open_fraction(dir_yp, r, mip, self_is_bottom));
+    float wz_zm = zm_ok ? wz * min(open_self, open_fraction(dir, r - dr, mip, below_is_bottom)) : 0.0;
+    float wz_zp = zp_ok ? wz * open_self : 0.0;
 
     float p = 0;
     p += wxm * pressure_correction[0].load(xm, dst_mip_level);
@@ -295,13 +309,15 @@ void apply(uint3 thread: SV_DispatchThreadID)
     // already get -- so the pressure force doesn't accelerate fluid through
     // a face that's (partially) rock
     float mip = heightmap_mip_level(velocity.resolution);
-    float open_self = 1.0 - solid_fraction(dir, r, mip);
-    float open_xm = min(open_self, 1.0 - solid_fraction(dir_xm, r, mip));
-    float open_xp = min(open_self, 1.0 - solid_fraction(dir_xp, r, mip));
-    float open_ym = min(open_self, 1.0 - solid_fraction(dir_ym, r, mip));
-    float open_yp = min(open_self, 1.0 - solid_fraction(dir_yp, r, mip));
-    float open_zm = zm_ok ? min(open_self, 1.0 - solid_fraction(dir, r - dr, mip)) : 0.0;
-    float open_zp = zp_ok ? min(open_self, 1.0 - solid_fraction(dir, r + dr, mip)) : 0.0;
+    bool self_is_bottom = layer == 0;
+    bool below_is_bottom = zm_ok && layer == 1;
+    float open_self = open_fraction(dir, r, mip, self_is_bottom);
+    float open_xm = min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
+    float open_xp = min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
+    float open_ym = min(open_self, open_fraction(dir_ym, r, mip, self_is_bottom));
+    float open_yp = min(open_self, open_fraction(dir_yp, r, mip, self_is_bottom));
+    float open_zm = zm_ok ? min(open_self, open_fraction(dir, r - dr, mip, below_is_bottom)) : 0.0;
+    float open_zp = zp_ok ? open_self : 0.0;
 
     float px0_eff = lerp(p_center, px0, open_xm);
     float px1_eff = lerp(p_center, px1, open_xp);
