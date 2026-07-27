@@ -22,7 +22,6 @@ uniform float3   sun_direction;
 uniform uint     frame_seed;
 uniform float3   atmosphere_rayleigh_color;
 uniform float    terrain_height;
-uniform float    surface_rotation;
 uniform float    atmosphere_height;
 uniform float    atmosphere_rayleigh_height;
 uniform float    atmosphere_mie_height;
@@ -31,7 +30,7 @@ uniform float    atmosphere_density;
 
 float3 get_surface_pos(float2 uv)
 {
-    return uv_to_xyz(uv) * (1.0 + terrain_height * planet_height.Sample(sampler, uv + float2(surface_rotation, 0)));
+    return sphere_uv_to_xyz(uv) * (1.0 + terrain_height * planet_height.Sample(sampler, uv));
 }
 
 void sample_atmosphere_density(float3 p, out float3 rayleigh, out float mie, out float cloud)
@@ -156,7 +155,7 @@ VertexOutput vs(uint vertexId : SV_VertexID)
 
     float2 uv = ij / float(sphere_resolution);
 
-    float3 pos = uv_to_xyz(uv) * (1 + atmosphere_height*1.5);
+    float3 pos = sphere_uv_to_xyz(uv) * (1 + atmosphere_height*1.5);
 
     VertexOutput v;
     v.pos = mul(view_projection, float4(pos, 1));
@@ -180,7 +179,7 @@ float4 fs(VertexOutput v) : SV_Target
         if (surface_t.x > 0)
         {
             float3 p = normalize(camera_position + ray_direction * surface_t.x);
-            float2 uv = xyz_to_uv(p);
+            float2 uv = xyz_to_sphere_uv(p);
 
             /*
             float3 normal = p;
@@ -196,7 +195,7 @@ float4 fs(VertexOutput v) : SV_Target
             float3 normal = normalize(cross(bitangent, tangent));
             // */
 
-            float3 albedo = planet_albedo.Sample(sampler, uv + float2(surface_rotation, 0)).rgb;
+            float3 albedo = planet_albedo.Sample(sampler, uv).rgb;
 
             float3 shadow_ray_origin = p * (1 + terrain_height);
             
