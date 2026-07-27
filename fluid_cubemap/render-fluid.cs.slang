@@ -12,6 +12,8 @@ uniform uint     render_mode;
 uniform uint2    resolution;
 uniform float2   mouse_pos;
 uniform uint     mip_level;
+uniform uint     frame_index;
+uniform uint     linear_sampling;
 
 RWTexture2D<float4> image;
 
@@ -19,6 +21,7 @@ enum RenderMode
 {
     Smoke,
     Velocity,
+    TangentVelocity,
     Tangent,
     Bitangent,
     Texels
@@ -46,9 +49,9 @@ void render(uint2 pixel: SV_DispatchThreadID)
     float2 ray_t;
     if (intersect_sphere(camera_pos, ray_dir, 1, ray_t))
     {
-        float3 pos = normalize(camera_pos + ray_dir * ray_t.x);
+        float3 dir = normalize(camera_pos + ray_dir * ray_t.x);
 
-        let frame = CubeMapTangentFrame(pos);
+        let frame = CubeMapTangentFrame(dir);
 
         switch ((RenderMode)render_mode)
         {
@@ -56,17 +59,20 @@ void render(uint2 pixel: SV_DispatchThreadID)
             {
                 if (smoke.vertical_resolution == 1)
                 {
-                    float s = smoke.sample_layer(pos, mip_level, 0);
+                    float s = linear_sampling == 0 ? smoke.sample_layer_nearest(dir, mip_level, 0) : smoke.sample_layer(dir, mip_level, 0);
                     c.rgb = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
                 }
                 break;
             }
             case RenderMode::Velocity:
+            case RenderMode::TangentVelocity:
             {
                 if (smoke.vertical_resolution == 1)
                 {
-                    float3 v = velocity.sample_layer(pos, 0);
-                    c.rgb = 5 * v + 0.5;
+                    float3 v = linear_sampling == 0 ? velocity.sample_layer_nearest(dir, 0) : velocity.sample_layer(dir, 0);
+                    if ((RenderMode)render_mode == RenderMode::TangentVelocity)
+                        v = velocity.to_local(dir, v);
+                    c.rgb = v + 0.5;
                 }
                 break;
             }
@@ -82,7 +88,7 @@ void render(uint2 pixel: SV_DispatchThreadID)
             }
             case RenderMode::Texels:
             {
-                float3 uvw = dir_to_cube_uvw(pos);
+                float3 uvw = dir_to_cube_uvw(dir);
                 uint3 texel = uint3(uint2(uvw.xy * smoke.resolution), uint(uvw.z));
 
                 c.rgb = float3(uint3(pcg(texel.x + pcg(texel.y)), pcg(texel.y + pcg(texel.x)), 0) % 255) / 255;
@@ -126,44 +132,49 @@ void render(uint2 pixel: SV_DispatchThreadID)
         float2 atmosphere_t;
         if (intersect_sphere(camera_pos, ray_dir, 1 + smoke.thickness, atmosphere_t))
         {
-            if ((RenderMode)render_mode == RenderMode::Smoke || (RenderMode)render_mode == RenderMode::Velocity)
+            if ((RenderMode)render_mode == RenderMode::Smoke || (RenderMode)render_mode == RenderMode::Velocity || (RenderMode)render_mode == RenderMode::TangentVelocity)
             {
                 atmosphere_t.x = max(0, atmosphere_t.x);
                 if (ray_t.x > 0)
                     atmosphere_t.y = min(ray_t.x, atmosphere_t.y);
 
-                RNG rng = RNG(asuint(atmosphere_t.y) + pcg(asuint(atmosphere_t.x)));
+                RNG rng = RNG(pcg(frame_index + pcg(pixel.y + pcg(pixel.x))));
 
                 uint N = 64;
+
                 float optical_depth = 0;
                 float t = atmosphere_t.x;
                 for (uint i = 0; i < N; i++)
                 {
                     float3 pos = camera_pos + ray_dir * t;
-                    if (t > atmosphere_t.y)
+                    if (t >= atmosphere_t.y)
                         break;
 
                     float3 color;
                     float density;
                     if ((RenderMode)render_mode == RenderMode::Smoke)
                     {
-                        float s = smoke.sample(pos, mip_level);
+                        float s = linear_sampling == 0 ? smoke.sample_nearest(pos, mip_level) : smoke.sample(pos, mip_level);;
                         color = saturate(float3(1 - exp(s), 1 - exp(-s), 0.1));
-                        density = s;
+                        density = 1 + s;
                     }
                     else
                     {
-                        float3 v = velocity.sample(pos);
+                        float3 v = linear_sampling == 0 ? velocity.sample_nearest(pos) : velocity.sample(pos);
+                        if ((RenderMode)render_mode == RenderMode::TangentVelocity)
+                            v = velocity.to_local(normalize(pos), v);
                         color = 5 * v + 0.5;
                         density = length(v);
                     }
 
-                    density = 1 + 5*density;
-                    density *= velocity.sample_density(length(pos)) / velocity.thickness;
+                    density *= velocity.sample_density(length(pos));
+                    density *= 5 / velocity.thickness;
 
-                    float step = (rng.nextFloat() + 5 * exp(-density)) * (atmosphere_t.y - atmosphere_t.x) / float(N);
+                    float step = (2 * (1 + velocity.thickness)) / float(N);
+                    step *= 0.5 + rng.nextFloat() * exp(-density);
+                    step = min(step, atmosphere_t.y - t);
 
-                    c.rgb += 3 * color * density * step * exp(-optical_depth);
+                    c.rgb += color * density * step * exp(-optical_depth);
                     optical_depth += step * density;
 
                     t += step;

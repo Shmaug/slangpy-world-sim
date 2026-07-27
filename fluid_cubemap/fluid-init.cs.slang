@@ -4,10 +4,9 @@ import SphericalField;
 uniform SphericalScalarField smoke;
 uniform SphericalVelocityField velocity;
 
-uniform float3 target_pos;
-uniform float  target_angle;
 uniform float3 target_dir;
-uniform float  plume_rise_speed;
+uniform float  target_angle;
+uniform float3 target_vel;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -25,7 +24,7 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
     float3 pos = cube_uvw_to_dir(float3((thread.xy + 0.5) / velocity.resolution, thread.z%6));
 
     // Distance from emission point
-    float angle = acos(clamp(dot(target_pos, pos), -1.0, 1.0));
+    float angle = acos(clamp(dot(target_dir, pos), -1.0, 1.0));
 
     // Create a plume at target_pos
     if (angle < target_angle * 2.0)
@@ -33,8 +32,7 @@ void emit_plume(uint3 thread: SV_DispatchThreadID)
         float normalized_dist = angle / (target_angle * 2.0);
         float gaussian = exp(-normalized_dist * normalized_dist * 4.0);
 
-        float2 tangential_kick = CubeMapTangentFrame(pos).to_local(target_dir);
-        float3 kick = float3(tangential_kick, plume_rise_speed);
+        float3 kick = CubeMapTangentFrame(pos).to_local3(target_vel);
 
         smoke.store(thread, smoke.load(thread) + gaussian);
         velocity.store(thread, velocity.load(thread) + gaussian * kick);

@@ -71,11 +71,18 @@ float3 cube_uvw_to_dir(float3 uvw)
 
 uint flatten_cube_texel(uint3 texel, uint resolution, uint vertical_resolution, uint mip = 0)
 {
-    uint offset = 0;
+    uint cube_face = texel.z % 6;
+    uint vertical_layer = texel.z / 6;
+
+    uint mip_offset = 0;
     for (uint i = 0; i < mip; i++)
-        offset += (resolution >> i) * (resolution >> i) * 6 * vertical_resolution;
+        mip_offset += (resolution >> i) * (resolution >> i) * 6 * vertical_resolution;
+
     uint mip_res = resolution >> mip;
-    return offset + morton2d(texel.xy) + texel.z * mip_res * mip_res;
+    uint face_offset = cube_face * mip_res * mip_res * vertical_resolution;
+    uint texel_index = morton2d(texel.xy) * vertical_resolution + vertical_layer;
+
+    return mip_offset + face_offset + texel_index;
 }
 
 // steps `cell` one layer up/down (same face); returns false at a closed
@@ -158,6 +165,7 @@ struct CubeMapTangentFrame
 struct SphericalScalarField
 {
     RWStructuredBuffer<float> data;
+    float radius;
     float thickness; // height above 1 of the simulation
     float scale_height; // scale height where average density is found
     uint resolution;
@@ -167,7 +175,7 @@ struct SphericalScalarField
     // normalized to 1 at the surface r=1
     float sample_density(float r)
     {
-        return exp(-(r - 1.0) / scale_height);
+        return exp(-(r - radius) / scale_height);
     }
 
     uint flatten_index(uint3 texel, uint mip = 0)
@@ -235,8 +243,28 @@ struct SphericalScalarField
     {
         float h = length(pos);
         float3 dir = pos / h;
-        float vertical_layer = vertical_resolution * ((h - 1) / thickness);
+        float vertical_layer = vertical_resolution * ((h - radius) / thickness);
         return sample(dir, vertical_layer, mip);
+    }
+
+    float sample_layer_nearest(float3 dir, uint mip, uint vertical_layer)
+    {
+        float3 cube_uvw = dir_to_cube_uvw(dir);
+        int2 texel = clamp(int2(cube_uvw.xy * (resolution>>mip)), 0, int(resolution>>mip) - 1);
+        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
+        return load(cell);
+    }
+
+    float sample_nearest(float3 pos, uint mip)
+    {
+        float h = length(pos);
+        float3 dir = pos / h;
+        float vertical_layer = vertical_resolution * ((h - radius) / thickness);
+        uint mip_res = resolution >> mip;
+        float3 cube_uvw = dir_to_cube_uvw(dir);
+        int2 texel = clamp(int2(cube_uvw.xy * mip_res), 0, int(mip_res) - 1);
+        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
+        return load(cell, mip);
     }
 }
 
@@ -245,7 +273,8 @@ struct SphericalVelocityField
     // local-frame velocity field: .xy is tangential (t,b), .z is the radial
     // (wall-normal) component, in world units per time (arc length = world
     // distance since the sphere has radius 1)
-    RWStructuredBuffer<float3> data;
+    RWByteAddressBuffer data;
+    float radius;
     float thickness; // height above 1 of the simulation
     float scale_height; // scale height where average density is found
     uint resolution;
@@ -255,7 +284,7 @@ struct SphericalVelocityField
     // normalized to 1 at the surface r=1
     float sample_density(float r)
     {
-        return exp(-max(0, r - 1.0) / scale_height);
+        return exp(-max(0, r - radius) / scale_height);
     }
 
     uint flatten_index(uint3 texel, uint mip = 0)
@@ -270,12 +299,12 @@ struct SphericalVelocityField
 
     float3 load(int3 texel, uint mip = 0)
     {
-        return bounds_check(texel) ? data[flatten_index(texel, mip)] : 0;
+        return bounds_check(texel) ? data.Load<float3>(sizeof(float3) * flatten_index(texel, mip)) : 0;
     }
     void store(int3 texel, float3 value, uint mip = 0)
     {
         if (bounds_check(texel))
-            data[flatten_index(texel, mip)] = value;
+            data.Store<float3>(sizeof(float3) * flatten_index(texel, mip), value);
     }
 
     uint3 get_neighbor(uint3 texel, int2 offset)
@@ -340,7 +369,26 @@ struct SphericalVelocityField
     {
         float h = length(pos);
         float3 dir = pos / h;
-        float vertical_layer = vertical_resolution * ((h - 1) / thickness);
+        float vertical_layer = vertical_resolution * ((h - radius) / thickness);
         return sample(dir, vertical_layer);
+    }
+
+    float3 sample_layer_nearest(float3 dir, uint vertical_layer)
+    {
+        float3 cube_uvw = dir_to_cube_uvw(dir);
+        int2 texel = clamp(int2(cube_uvw.xy * resolution), 0, int(resolution) - 1);
+        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
+        return load_world_space(cell, dir);
+    }
+
+    float3 sample_nearest(float3 pos)
+    {
+        float h = length(pos);
+        float3 dir = pos / h;
+        float vertical_layer = vertical_resolution * ((h - radius) / thickness);
+        float3 cube_uvw = dir_to_cube_uvw(dir);
+        int2 texel = clamp(int2(cube_uvw.xy * resolution), 0, int(resolution) - 1);
+        uint3 cell = uint3(uint2(texel), uint(cube_uvw.z) + 6 * uint(vertical_layer));
+        return load_world_space(cell, dir);
     }
 }

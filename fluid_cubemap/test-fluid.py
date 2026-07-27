@@ -59,8 +59,60 @@ class App:
         self.simulator = CubeFluidSimulator(self.device, spy.ui.Group(window, label="Simulation"))
         self.camera = Camera()
 
-        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Tangent", "Bitangent", "Texels" ])
+        self.dt_ui = spy.ui.DragFloat(window, "Simulation Timestep", 0.01)
+
+        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Tangent Velocity", "Tangent", "Bitangent", "Texels" ])
+        self.use_linear_sampling = spy.ui.CheckBox(window, "Use linear sampling", value=True)
         self.render_mip = spy.ui.DragInt(window, "Mip Level", 0, min=0)
+
+        self.emit_plume_ui = spy.ui.CheckBox(window, "Emit plume")
+        self.plume_location_ui = spy.ui.DragFloat2(window, "Plume location lat/lon", spy.float2(0,0))
+        self.plume_direction_ui = spy.ui.DragFloat2(window, "Plume azimuth/horizon", spy.float2(0,0))
+        self.plume_speed_ui = spy.ui.DragFloat(window, "Plume speed", 0.2, speed=0.01)
+        self.plume_vertical_speed_ui = spy.ui.DragFloat(window, "Plume vertical speed", 0.01, speed=0.01)
+        self.plume_radius_ui = spy.ui.DragFloat(window, "Plume radius", 2, speed=0.01)
+
+        self.emit_kernel = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["emit_plume"]))
+
+        def emit_plume(smoke_vars, velocity_vars, command_encoder:spy.CommandEncoder):
+            if self.emit_plume_ui.value:
+                sin_lat = spy.math.sin(spy.math.radians(self.plume_location_ui.value.x))
+                cos_lat = spy.math.cos(spy.math.radians(self.plume_location_ui.value.x))
+                sin_lon = spy.math.sin(spy.math.radians(self.plume_location_ui.value.y))
+                cos_lon = spy.math.cos(spy.math.radians(self.plume_location_ui.value.y))
+                dir = spy.float3(
+                    cos_lat * cos_lon,
+                    sin_lat,
+                    cos_lat * sin_lon
+                )
+                
+                sin_azimuth = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.x))
+                cos_azimuth = spy.math.cos(spy.math.radians(self.plume_direction_ui.value.x))
+                sin_horizon = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.y))
+                cos_horizon = spy.math.cos(spy.math.radians(self.plume_direction_ui.value.y))
+                tangent_vel = spy.float3(
+                    cos_horizon * sin_azimuth,
+                    cos_horizon * cos_azimuth,
+                    sin_horizon
+                )
+                tangent_vel.x *= self.plume_speed_ui.value
+                tangent_vel.y *= self.plume_speed_ui.value
+                tangent_vel.z *= self.plume_vertical_speed_ui.value
+                east = spy.math.normalize(spy.math.cross(spy.float3(0, 1, 0), dir))
+                north = spy.math.cross(dir, east)
+                vel = east * tangent_vel.x + north * tangent_vel.y + dir * tangent_vel.z
+
+                self.emit_kernel.dispatch(
+                    self.simulator.dispatch_dim(),
+                    {
+                        "smoke":        smoke_vars,
+                        "velocity":     velocity_vars,
+                        "target_dir":   dir,
+                        "target_angle": spy.math.radians(self.plume_radius_ui.value),
+                        "target_vel":   vel,
+                    },
+                    command_encoder)
+        self.simulator.emitters.append(emit_plume)
 
     def on_resize(self, width: int, height: int):
         self.device.wait()
@@ -84,6 +136,7 @@ class App:
         self.input_state.on_mouse_event(event, has_focus)
 
     def main_loop(self):
+        frame_index = 0
         self.frame_timer = spy.Timer()
         while not self.window.should_close():
             self.input_state.update()
@@ -107,7 +160,7 @@ class App:
             
             command_encoder = self.device.create_command_encoder()
 
-            self.simulator.step(command_encoder, dt)
+            self.simulator.step(command_encoder, self.dt_ui.value)
 
             if self.render_texture is None or self.render_texture.width != surface_texture.width or self.render_texture.height != surface_texture.height:
                 self.render_texture = self.device.create_texture(
@@ -142,7 +195,7 @@ class App:
             if mouse_pos is None:
                 mouse_pos = spy.float2(0,0)
 
-            self.render_mip.value   = min(max(self.render_mip.value, 0),   self.simulator.mip_count()-1)
+            self.render_mip.value = min(max(self.render_mip.value, 0),   self.simulator.mip_count()-1)
 
             self.render_kernel.dispatch(
                 [ surface_texture.width, surface_texture.height, 1 ],
@@ -157,6 +210,8 @@ class App:
                     "mouse_pos": mouse_pos,
                     "image": self.render_texture,
                     "mip_level": self.render_mip.value,
+                    "frame_index": frame_index,
+                    "linear_sampling": self.use_linear_sampling.value,
                 },
                 command_encoder
             )
@@ -169,6 +224,7 @@ class App:
             del surface_texture
 
             self.surface.present()
+            frame_index += 1
             
         self.device.wait()
 
