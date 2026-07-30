@@ -60,61 +60,65 @@ class App:
         self.camera = Camera()
 
         self.dt_ui = spy.ui.DragFloat(window, "Simulation Timestep", 0.01)
+        self.bouyancy = spy.ui.DragFloat(window, "Bouyancy", 0.2, speed=0.01)
 
-        self.render_mode = spy.ui.ComboBox(window, "Render", 0, items=[ "Smoke", "Velocity", "Tangent Velocity", "Tangent", "Bitangent", "Texels" ])
-        self.render_channel = spy.ui.DragInt(window, "Channel", 0, speed=0.1)
-        self.use_linear_sampling = spy.ui.CheckBox(window, "Use linear sampling", value=True)
-        self.render_mip = spy.ui.DragInt(window, "Mip Level", 0, min=0)
+        group = spy.ui.Group(window, label="Edit")
+        self.emit_plume_ui = spy.ui.CheckBox(group, "Emit plume")
+        self.plume_location_ui = spy.ui.DragFloat2(group, "Plume location lat/lon", spy.float2(0,0))
+        self.plume_direction_ui = spy.ui.DragFloat2(group, "Plume azimuth/horizon", spy.float2(0,0))
+        self.plume_speed_ui = spy.ui.DragFloat(group, "Plume speed", 0.2, speed=0.01)
+        self.plume_vertical_speed_ui = spy.ui.DragFloat(group, "Plume vertical speed", 0.01, speed=0.01)
+        self.plume_radius_ui = spy.ui.DragFloat(group, "Plume radius", 2, speed=0.01)
+        self.plume_temp = spy.ui.DragFloat(group, "Plume temperature", 0.25, speed=0.01)
 
-        self.emit_plume_ui = spy.ui.CheckBox(window, "Emit plume")
-        self.plume_location_ui = spy.ui.DragFloat2(window, "Plume location lat/lon", spy.float2(0,0))
-        self.plume_direction_ui = spy.ui.DragFloat2(window, "Plume azimuth/horizon", spy.float2(0,0))
-        self.plume_speed_ui = spy.ui.DragFloat(window, "Plume speed", 0.2, speed=0.01)
-        self.plume_vertical_speed_ui = spy.ui.DragFloat(window, "Plume vertical speed", 0.01, speed=0.01)
-        self.plume_radius_ui = spy.ui.DragFloat(window, "Plume radius", 2, speed=0.01)
-        self.emit_channel = spy.ui.DragInt(window, "Emit channel", 0, speed=0.1)
+        group = spy.ui.Group(window, label="Render")
+        self.render_mode = spy.ui.ComboBox(group, "Render", 0, items=[ "Smoke", "Velocity", "Tangent Velocity", "Tangent", "Bitangent", "Texels" ])
+        self.use_linear_sampling = spy.ui.CheckBox(group, "Use linear sampling", value=True)
+        self.render_mip = spy.ui.DragInt(group, "Mip Level", 0, min=0)
 
-        self.emit_kernel = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["emit_plume"]))
+        self.add_forces_kernel = self.device.create_compute_kernel(self.device.load_program("fluid-init.cs.slang", ["add_forces"]))
 
-        def emit_plume(smoke_vars, velocity_vars, command_encoder:spy.CommandEncoder):
-            if self.emit_plume_ui.value:
-                sin_lat = spy.math.sin(spy.math.radians(self.plume_location_ui.value.x))
-                cos_lat = spy.math.cos(spy.math.radians(self.plume_location_ui.value.x))
-                sin_lon = spy.math.sin(spy.math.radians(self.plume_location_ui.value.y))
-                cos_lon = spy.math.cos(spy.math.radians(self.plume_location_ui.value.y))
-                dir = spy.float3(
-                    cos_lat * sin_lon,
-                    sin_lat,
-                    cos_lat * cos_lon
-                )
-                
-                sin_azimuth = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.x))
-                cos_azimuth = spy.math.cos(spy.math.radians(self.plume_direction_ui.value.x))
-                sin_horizon = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.y))
-                cos_horizon = spy.math.cos(spy.math.radians(self.plume_direction_ui.value.y))
-                tangent_vel = spy.float3(
-                    cos_horizon * cos_azimuth,
-                    cos_horizon * sin_azimuth,
-                    sin_horizon
-                )
-                tangent_vel.x *= self.plume_speed_ui.value
-                tangent_vel.y *= self.plume_speed_ui.value
-                tangent_vel.z *= self.plume_vertical_speed_ui.value
-                east = spy.math.normalize(spy.math.cross(spy.float3(0, 1, 0), dir))
-                north = spy.math.cross(dir, east)
-                vel = east * tangent_vel.x + north * tangent_vel.y + dir * tangent_vel.z
+        def emit_plume(command_encoder:spy.CommandEncoder):
+            sin_lat = spy.math.sin(spy.math.radians(self.plume_location_ui.value.x))
+            cos_lat = spy.math.cos(spy.math.radians(self.plume_location_ui.value.x))
+            sin_lon = spy.math.sin(spy.math.radians(self.plume_location_ui.value.y))
+            cos_lon = spy.math.cos(spy.math.radians(self.plume_location_ui.value.y))
+            dir = spy.float3(
+                cos_lat * sin_lon,
+                sin_lat,
+                cos_lat * cos_lon
+            )
+            
+            sin_azimuth = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.x))
+            cos_azimuth = spy.math.cos(spy.math.radians(self.plume_direction_ui.value.x))
+            sin_horizon = spy.math.sin(spy.math.radians(self.plume_direction_ui.value.y))
+            cos_horizon = spy.math.cos(spy.math.radians(self.plume_direction_ui.value.y))
+            tangent_vel = spy.float3(
+                cos_horizon * cos_azimuth,
+                cos_horizon * sin_azimuth,
+                sin_horizon
+            )
+            tangent_vel *= self.plume_speed_ui.value
+            east = spy.math.normalize(spy.math.cross(spy.float3(0, 1, 0), dir))
+            north = spy.math.cross(dir, east)
+            vel = east * tangent_vel.x + north * tangent_vel.y + dir * tangent_vel.z
 
-                self.emit_kernel.dispatch(
-                    self.simulator.dispatch_dim(),
-                    {
-                        "smoke":        smoke_vars,
-                        "velocity":     velocity_vars,
-                        "target_dir":   dir,
-                        "target_angle": spy.math.radians(self.plume_radius_ui.value),
-                        "target_vel":   vel,
-                        "target_channel": min(max(self.emit_channel.value, 0), self.simulator.channels-1)
-                    },
-                    command_encoder)
+            self.add_forces_kernel.dispatch(
+                self.simulator.dispatch_dim(),
+                {
+                    "smoke":        self.simulator.smoke_field(0),
+                    "velocity":     self.simulator.velocity_field(0),
+                    "smoke_out":    self.simulator.smoke_field(1),
+                    "velocity_out": self.simulator.velocity_field(1),
+                    "target_dir":   dir,
+                    "target_angle": spy.math.radians(self.plume_radius_ui.value) if self.emit_plume_ui.value else 0,
+                    "target_vel":   vel,
+                    "target_vertical_vel": self.plume_vertical_speed_ui.value,
+                    "target_temp": self.plume_temp.value,
+                    "bouyancy": self.bouyancy.value,
+                    "dt": self.dt_ui.value,
+                },
+                command_encoder)
         self.simulator.emitters.append(emit_plume)
 
     def on_resize(self, width: int, height: int):
@@ -209,7 +213,6 @@ class App:
                     "inv_view_projection": spy.math.inverse(view_projection),
                     "camera_pos": self.camera.position,
                     "render_mode": self.render_mode.value,
-                    "render_channel": self.render_channel.value,
                     "resolution": spy.uint2(surface_texture.width, surface_texture.height),
                     "mouse_pos": mouse_pos,
                     "image": self.render_texture,

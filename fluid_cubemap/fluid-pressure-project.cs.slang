@@ -15,59 +15,6 @@ Texture2D<float> surface_height2;
 SamplerState linear_sampler;
 uniform float terrain_height;
 
-// mip level of `surface_height`/`surface_height2` whose texel footprint is
-// roughly one fluid cell wide at `fluid_res`, so the sub-grid stats below
-// are drawn from the same footprint the fluid solver actually sees
-float heightmap_mip_level(uint fluid_res)
-{
-    uint2 dims;
-    surface_height.GetDimensions(dims.x, dims.y);
-    return max(0.0, log2(float(dims.x) / float(fluid_res)));
-}
-
-// mean and variance of terrain radius over the heightmap texels covered by
-// one fluid cell's footprint at `mip` (surface_height2 holds height*height,
-// so its mip chain gives E[h^2] where surface_height's gives E[h]^-shaped
-// mean -- var = E[h^2] - E[h]^2)
-void terrain_radius_stats(float3 dir, float mip, out float mean, out float variance)
-{
-    float2 uv = xyz_to_sphere_uv(dir);
-    float h = surface_height.SampleLevel(linear_sampler, uv, mip);
-    float h2 = surface_height2.SampleLevel(linear_sampler, uv, mip);
-    mean = 1.0 + terrain_height * h;
-    variance = sqr(terrain_height) * max(0.0, h2 - h * h);
-}
-
-// fraction of this cell's sub-grid footprint whose terrain sits above `r`,
-// modeling the heightmap texels under the footprint as Gaussian(mean,
-// variance) -- this is what lets a fluid cell straddling a sub-grid ridge
-// register as partially blocked instead of snapping to fully open/solid
-// depending only on whether the mean height crosses `r`. Degenerates to a
-// hard step once the heightmap is no finer than the fluid grid (variance
-// collapses to 0 at that mip).
-float solid_fraction(float3 dir, float r, float mip)
-{
-    if (terrain_height > 0)
-    {
-        float mean, variance;
-        terrain_radius_stats(dir, mip, mean, variance);
-        if (variance < 1e-12)
-            return r < mean ? 1.0 : 0.0;
-        return saturate(0.5 * (1.0 - erf((r - mean) * M_SQRT1_2 / sqrt(variance))));
-    }
-    return 0;
-}
-
-// terrain only ever occupies the bottom-most fluid layer (layer 0, the one
-// touching r=1) -- `solid_fraction` itself has no notion of layers, so
-// callers gate it explicitly with `is_bottom` rather than letting a tall
-// `terrain_height` bleed rock into higher layers just because `r` still
-// falls below the mean terrain radius there
-float open_fraction(float3 dir, float r, float mip, bool is_bottom)
-{
-    return is_bottom ? 1.0 - solid_fraction(dir, r, mip) : 1.0;
-}
-
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void compute_divergence(uint3 thread: SV_DispatchThreadID)
@@ -76,86 +23,69 @@ void compute_divergence(uint3 thread: SV_DispatchThreadID)
     if (!divergence.bounds_check(cell))
         return;
 
-    CubeCoord xm = velocity.get_neighbor(cell, int2(-1, 0));
-    CubeCoord xp = velocity.get_neighbor(cell, int2( 1, 0));
-    CubeCoord ym = velocity.get_neighbor(cell, int2( 0,-1));
-    CubeCoord yp = velocity.get_neighbor(cell, int2( 0, 1));
+    CubeCoord x0 = velocity.get_neighbor(cell, int2(-1, 0));
+    CubeCoord x1 = velocity.get_neighbor(cell, int2( 1, 0));
+    CubeCoord y0 = velocity.get_neighbor(cell, int2( 0,-1));
+    CubeCoord y1 = velocity.get_neighbor(cell, int2( 0, 1));
+    CubeCoord z0, z1;
+    bool z0_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, z0);
+    bool z1_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, z1);
 
     float3 dir    = cube_uvw_to_dir(float3(float2(cell.texel + 0.5) / velocity.resolution, cell.face));
-    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.texel + 0.5) / velocity.resolution, xm.face));
-    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.texel + 0.5) / velocity.resolution, xp.face));
-    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.texel + 0.5) / velocity.resolution, ym.face));
-    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.texel + 0.5) / velocity.resolution, yp.face));
+    float3 dir_x0 = cube_uvw_to_dir(float3(float2(x0.texel + 0.5) / velocity.resolution, x0.face));
+    float3 dir_x1 = cube_uvw_to_dir(float3(float2(x1.texel + 0.5) / velocity.resolution, x1.face));
+    float3 dir_y0 = cube_uvw_to_dir(float3(float2(y0.texel + 0.5) / velocity.resolution, y0.face));
+    float3 dir_y1 = cube_uvw_to_dir(float3(float2(y1.texel + 0.5) / velocity.resolution, y1.face));
 
     let frame = CubeMapTangentFrame(dir);
     float3 vel_center = velocity.load(cell);
-    float vel_xm = frame.to_local(velocity.load_world_space(xm, dir)).x;
-    float vel_xp = frame.to_local(velocity.load_world_space(xp, dir)).x;
-    float vel_ym = frame.to_local(velocity.load_world_space(ym, dir)).y;
-    float vel_yp = frame.to_local(velocity.load_world_space(yp, dir)).y;
+    float vel_x0 = frame.to_local(velocity.load_world_space(x0, dir)).x;
+    float vel_x1 = frame.to_local(velocity.load_world_space(x1, dir)).x;
+    float vel_y0 = frame.to_local(velocity.load_world_space(y0, dir)).y;
+    float vel_y1 = frame.to_local(velocity.load_world_space(y1, dir)).y;
+    float vel_z0 = z0_ok ? frame.to_local3(velocity.load_world_space(z0, dir)).z : -vel_center.z;
+    float vel_z1 = z1_ok ? frame.to_local3(velocity.load_world_space(z1, dir)).z : 0;
 
+    float dr = velocity.thickness / velocity.vertical_resolution;
+    float r = 1.0 + dr * (cell.layer + 0.5);
+    
     // non-uniform central difference: neighbor spacing varies with where
     // `cell` sits on its face, so the two half-differences are weighted by
     // the actual geodesic distance to each neighbor instead of assumed to
     // both be one texel wide
-    float dist_xm = sphere_geodesic_distance(dir, dir_xm);
-    float dist_xp = sphere_geodesic_distance(dir, dir_xp);
-    float dist_ym = sphere_geodesic_distance(dir, dir_ym);
-    float dist_yp = sphere_geodesic_distance(dir, dir_yp);
+    float dist_x0 = sphere_geodesic_distance(dir, dir_x0) * r;
+    float dist_x1 = sphere_geodesic_distance(dir, dir_x1) * r;
+    float dist_y0 = sphere_geodesic_distance(dir, dir_y0) * r;
+    float dist_y1 = sphere_geodesic_distance(dir, dir_y1) * r;
 
     // radial term: same (face,u,v) footprint at layer+-1, so no parallel
     // transport is needed (the outward normal is identical at every layer);
-    // at a closed boundary the missing neighbor is mirrored with a sign
-    // flip so the wall-normal velocity is exactly zero at the wall
-    float dr = velocity.thickness / velocity.vertical_resolution;
-    float r = 1.0 + dr * (cell.layer + 0.5);
-    CubeCoord zm_cell, zp_cell;
-    bool zm_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, zm_cell);
-    bool zp_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, zp_cell);
+    // at the closed bottom the missing neighbor is mirrored with a sign
+    // flip so the wall-normal velocity is exactly zero at the wall; at the
+    // open top the ghost is vacuum (zero velocity, zero density) so mass
+    // is free to flow out through the last layer
     float w_center = vel_center.z;
-    float w_zm_raw = zm_ok ? velocity.load(zm_cell).z : -w_center;
-    float w_zp_raw = zp_ok ? velocity.load(zp_cell).z : -w_center;
-
-    // sub-grid terrain porosity: a face is only as open as whichever side
-    // of it has less rock under it (`min` of the two cells' openness), so
-    // partially-blocked faces bleed flow through in proportion instead of
-    // an all-or-nothing wall; this is what squeezes flow upward as it
-    // crosses a ridge that only partially fills the cells it passes
-    // through, rather than only reacting once a whole cell is submerged
-    float mip = heightmap_mip_level(velocity.resolution);
-    bool self_is_bottom = cell.layer == 0;
-    bool below_is_bottom = zm_ok && cell.layer == 1;
-    float open_self = open_fraction(dir, r, mip, self_is_bottom);
-    float open_xm = min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
-    float open_xp = min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
-    float open_ym = min(open_self, open_fraction(dir_ym, r, mip, self_is_bottom));
-    float open_yp = min(open_self, open_fraction(dir_yp, r, mip, self_is_bottom));
-    float open_zm = zm_ok ? min(open_self, open_fraction(dir, r - dr, mip, below_is_bottom)) : 0.0;
-    float open_zp = zp_ok ? open_self : 0.0;
-
-    float vel_xm_eff = lerp(-vel_center.x, vel_xm, open_xm);
-    float vel_xp_eff = lerp(-vel_center.x, vel_xp, open_xp);
-    float vel_ym_eff = lerp(-vel_center.y, vel_ym, open_ym);
-    float vel_yp_eff = lerp(-vel_center.y, vel_yp, open_yp);
-    float w_zm = lerp(-w_center, w_zm_raw, open_zm);
-    float w_zp = lerp(-w_center, w_zp_raw, open_zp);
+    float w_z0 = z0_ok ? velocity.load(z0).z : -w_center; // mirror at bottom
+    float w_z1 = z1_ok ? velocity.load(z1).z : 0; // vacuum at open top
 
     // anelastic divergence constraint div(rho0 * u) = 0: rho0 only varies
     // radially, so it factors out of the horizontal terms as a plain scalar,
     // but the vertical term needs to be in flux form (rho0 sampled at each
-    // neighbor layer) to capture d(rho0)/dr; at a closed boundary there's no
+    // neighbor layer) to capture d(rho0)/dr; at the closed bottom there's no
     // neighbor layer to evaluate rho0 at, so the ghost reuses this cell's own
-    // rho0 (consistent with the w sign-flip ghost above)
+    // rho0 (consistent with the w sign-flip ghost above), while the open top
+    // ghost uses rho0=0 (vacuum), consistent with the w_z1 ghost above
     float rho0 = velocity.sample_density(r);
-    float rho0_zm = zm_ok ? velocity.sample_density(r - dr) : rho0;
-    float rho0_zp = zp_ok ? velocity.sample_density(r + dr) : rho0;
+    float rho0_z0 = z0_ok ? velocity.sample_density(r - dr) : rho0;
+    float rho0_z1 = z1_ok ? velocity.sample_density(r + dr) : 0;
 
-    // scaling the whole cell by `open_self` keeps a mostly-solid cell inert
-    // in the solve instead of fighting it toward a spurious target
-    divergence.store(cell, open_self * (rho0 * (
-        (vel_xp_eff - vel_xm_eff) / (dist_xm + dist_xp) +
-        (vel_yp_eff - vel_ym_eff) / (dist_ym + dist_yp)) +
-        (rho0_zp * w_zp - rho0_zm * w_zm) / (2.0 * dr)));
+    // both ghosts (bottom mirror, top vacuum) sit at the same canonical
+    // spacing dr, so the flux derivative always spans 2*dr regardless of
+    // which boundary (if any) is being ghosted
+    divergence.store(cell, rho0 * (
+        (vel_x1 - vel_x0) / (dist_x0 + dist_x1) +
+        (vel_y1 - vel_y0) / (dist_y0 + dist_y1)) +
+        (rho0_z1 * w_z1 - rho0_z0 * w_z0) / (2.0 * dr));
 }
 
 [shader("compute")]
@@ -166,10 +96,17 @@ void step(uint3 thread: SV_DispatchThreadID)
     if (!divergence.bounds_check(cell, dst_mip_level))
         return;
 
-    CubeCoord xm = divergence.get_neighbor(cell, int2(-1, 0), dst_mip_level);
-    CubeCoord xp = divergence.get_neighbor(cell, int2( 1, 0), dst_mip_level);
-    CubeCoord ym = divergence.get_neighbor(cell, int2( 0,-1), dst_mip_level);
-    CubeCoord yp = divergence.get_neighbor(cell, int2( 0, 1), dst_mip_level);
+    float dr = velocity.thickness / velocity.vertical_resolution;
+    float r = 1.0 + dr * (cell.layer + 0.5);
+
+    CubeCoord x0 = divergence.get_neighbor(cell, int2(-1, 0), dst_mip_level);
+    CubeCoord x1 = divergence.get_neighbor(cell, int2( 1, 0), dst_mip_level);
+    CubeCoord y0 = divergence.get_neighbor(cell, int2( 0,-1), dst_mip_level);
+    CubeCoord y1 = divergence.get_neighbor(cell, int2( 0, 1), dst_mip_level);
+
+    CubeCoord z0, z1;
+    bool z0_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, z0);
+    bool z1_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, z1);
 
     // non-uniform Jacobi stencil for the Laplacian: on a uniform grid every
     // neighbor's weight collapses to 1 (matching the old p*0.25 average),
@@ -178,63 +115,51 @@ void step(uint3 thread: SV_DispatchThreadID)
     // derivative finite-difference formula instead of a plain average
     float3 dir = cube_uvw_to_dir(float3(float2(cell.texel + 0.5) / velocity.resolution, cell.face));
     uint mip_res = velocity.resolution >> dst_mip_level;
-    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.texel + 0.5) / mip_res, xm.face));
-    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.texel + 0.5) / mip_res, xp.face));
-    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.texel + 0.5) / mip_res, ym.face));
-    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.texel + 0.5) / mip_res, yp.face));
-    float hxm = sphere_geodesic_distance(dir, dir_xm);
-    float hxp = sphere_geodesic_distance(dir, dir_xp);
-    float hym = sphere_geodesic_distance(dir, dir_ym);
-    float hyp = sphere_geodesic_distance(dir, dir_yp);
+    float3 dir_xm = cube_uvw_to_dir(float3(float2(x0.texel + 0.5) / mip_res, x0.face));
+    float3 dir_xp = cube_uvw_to_dir(float3(float2(x1.texel + 0.5) / mip_res, x1.face));
+    float3 dir_ym = cube_uvw_to_dir(float3(float2(y0.texel + 0.5) / mip_res, y0.face));
+    float3 dir_yp = cube_uvw_to_dir(float3(float2(y1.texel + 0.5) / mip_res, y1.face));
+    float d_x0 = sphere_geodesic_distance(dir, dir_xm) * r;
+    float d_x1 = sphere_geodesic_distance(dir, dir_xp) * r;
+    float d_y0 = sphere_geodesic_distance(dir, dir_ym) * r;
+    float d_y1 = sphere_geodesic_distance(dir, dir_yp) * r;
+    // both ghosts (bottom Neumann copy, top Dirichlet 0) sit at the same
+    // canonical spacing dr as a real neighbor would
+    float d_z0 = dr;
+    float d_z1 = dr;
 
-    float wxm = 2.0 / (hxm * (hxm + hxp));
-    float wxp = 2.0 / (hxp * (hxm + hxp));
-    float wym = 2.0 / (hym * (hym + hyp));
-    float wyp = 2.0 / (hyp * (hym + hyp));
+    float d_sum_x = d_x0 + d_x1;
+    float d_sum_y = d_y0 + d_y1;
+    float d_sum_z = d_z0 + d_z1;
+
+    float w_x0 = 2.0 / (d_x0 * d_sum_x);
+    float w_x1 = 2.0 / (d_x1 * d_sum_x);
+    float w_y0 = 2.0 / (d_y0 * d_sum_y);
+    float w_y1 = 2.0 / (d_y1 * d_sum_y);
+    float w_z0 = 2.0 / (d_z0 * d_sum_z);
+    float w_z1 = 2.0 / (d_z1 * d_sum_z);
 
     // vertical (radial) neighbors: uniform spacing, independent of the
-    // horizontal mip level. At a closed boundary there's no flux across the
+    // horizontal mip level. At the closed bottom there's no flux across the
     // wall, so a Neumann (zero-gradient) condition applies: the ghost value
-    // is just a copy of this cell's own (current-iterate) pressure.
-    float dr = velocity.thickness / velocity.vertical_resolution;
-    float r = 1.0 + dr * (cell.layer + 0.5);
-    CubeCoord zm_cell, zp_cell;
-    bool zm_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, zm_cell);
-    bool zp_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, zp_cell);
+    // is just a copy of this cell's own (current-iterate) pressure. At the
+    // open top the atmosphere drains to ambient pressure 0 just past the
+    // last layer (Dirichlet).
     float p_center = pressure_correction[0].load<1>(cell, dst_mip_level);
-    float p_zm = pressure_correction[0].load<1>(zm_ok ? zm_cell : cell, dst_mip_level);
-    float p_zp = pressure_correction[0].load<1>(zp_ok ? zp_cell : cell, dst_mip_level);
-    float wz = 1.0 / (dr * dr);
-
-    // sub-grid terrain porosity (see compute_divergence): scale each
-    // neighbor's Laplacian weight by how open that face is, so a
-    // mostly-blocked face is effectively dropped from the Jacobi average
-    // rather than needing an explicit ghost value -- zeroing its weight
-    // already reproduces the zero-flux wall condition
-    float mip = heightmap_mip_level(mip_res);
-    bool self_is_bottom = cell.layer == 0;
-    bool below_is_bottom = zm_ok && cell.layer == 1;
-    float open_self = open_fraction(dir, r, mip, self_is_bottom);
-    wxm *= min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
-    wxp *= min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
-    wym *= min(open_self, open_fraction(dir_ym, r, mip, self_is_bottom));
-    wyp *= min(open_self, open_fraction(dir_yp, r, mip, self_is_bottom));
-    float wz_zm = zm_ok ? wz * min(open_self, open_fraction(dir, r - dr, mip, below_is_bottom)) : 0.0;
-    float wz_zp = zp_ok ? wz * open_self : 0.0;
 
     float p = 0;
-    p += wxm * pressure_correction[0].load<1>(xm, dst_mip_level).x;
-    p += wxp * pressure_correction[0].load<1>(xp, dst_mip_level).x;
-    p += wym * pressure_correction[0].load<1>(ym, dst_mip_level).x;
-    p += wyp * pressure_correction[0].load<1>(yp, dst_mip_level).x;
-    p += wz_zm * p_zm;
-    p += wz_zp * p_zp;
+    p += w_x0 * pressure_correction[0].load<1>(x0, dst_mip_level).x;
+    p += w_x1 * pressure_correction[0].load<1>(x1, dst_mip_level).x;
+    p += w_y0 * pressure_correction[0].load<1>(y0, dst_mip_level).x;
+    p += w_y1 * pressure_correction[0].load<1>(y1, dst_mip_level).x;
+    p += w_z0 * (z0_ok ? pressure_correction[0].load<1>(z0, dst_mip_level).x : p_center);
+    p += w_z1 * (z1_ok ? pressure_correction[0].load<1>(z1, dst_mip_level).x : 0);
 
     p -= divergence.load<1>(cell, dst_mip_level).x;
 
     // a cell fully walled in by terrain has every weight collapse to 0 --
     // fall back to holding its current value rather than dividing by 0
-    float total_w = wxm + wxp + wym + wyp + wz_zm + wz_zp;
+    float total_w = w_x0 + w_x1 + w_y0 + w_y1 + w_z0 + w_z1;
     pressure_correction[1].store(cell, total_w > 1e-8 ? p / total_w : p_center, dst_mip_level);
 }
 
@@ -263,65 +188,45 @@ void apply(uint3 thread: SV_DispatchThreadID)
     if (!velocity.bounds_check(cell))
         return;
 
-    CubeCoord xm = pressure_correction[0].get_neighbor(cell, int2(-1, 0));
-    CubeCoord xp = pressure_correction[0].get_neighbor(cell, int2( 1, 0));
-    CubeCoord ym = pressure_correction[0].get_neighbor(cell, int2( 0,-1));
-    CubeCoord yp = pressure_correction[0].get_neighbor(cell, int2( 0, 1));
+    CubeCoord x0 = pressure_correction[0].get_neighbor(cell, int2(-1, 0));
+    CubeCoord x1 = pressure_correction[0].get_neighbor(cell, int2( 1, 0));
+    CubeCoord y0 = pressure_correction[0].get_neighbor(cell, int2(0, -1));
+    CubeCoord y1 = pressure_correction[0].get_neighbor(cell, int2(0, 1));
+    CubeCoord z0, z1;
+    bool z0_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, z0);
+    bool z1_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, z1);
 
-    float px0 = pressure_correction[0].load<1>(xm);
-    float px1 = pressure_correction[0].load<1>(xp);
-    float py0 = pressure_correction[0].load<1>(ym);
-    float py1 = pressure_correction[0].load<1>(yp);
+    // vertical pressure gradient: same Neumann (copy-of-center) bottom
+    // ghost and Dirichlet (ambient 0) top ghost as the Jacobi step above
+    float dr = velocity.thickness / velocity.vertical_resolution;
+    float r = 1.0 + dr * (cell.layer + 0.5);
+
+    float p_center = pressure_correction[0].load<1>(cell);
+    float px0 = pressure_correction[0].load<1>(x0);
+    float px1 = pressure_correction[0].load<1>(x1);
+    float py0 = pressure_correction[0].load<1>(y0);
+    float py1 = pressure_correction[0].load<1>(y1);
+    float pz0 = z0_ok ? pressure_correction[0].load<1>(z0) : p_center;
+    float pz1 = z1_ok ? pressure_correction[0].load<1>(z1) : 0;
 
     // same non-uniform central difference as compute_divergence, so the
     // gradient removed here matches the spacing the divergence/Laplacian
     // were computed with
     float3 dir    = cube_uvw_to_dir(float3(float2(cell.texel + 0.5) / velocity.resolution, cell.face));
-    float3 dir_xm = cube_uvw_to_dir(float3(float2(xm.texel + 0.5) / velocity.resolution, xm.face));
-    float3 dir_xp = cube_uvw_to_dir(float3(float2(xp.texel + 0.5) / velocity.resolution, xp.face));
-    float3 dir_ym = cube_uvw_to_dir(float3(float2(ym.texel + 0.5) / velocity.resolution, ym.face));
-    float3 dir_yp = cube_uvw_to_dir(float3(float2(yp.texel + 0.5) / velocity.resolution, yp.face));
-    float dist_xm = sphere_geodesic_distance(dir, dir_xm);
-    float dist_xp = sphere_geodesic_distance(dir, dir_xp);
-    float dist_ym = sphere_geodesic_distance(dir, dir_ym);
-    float dist_yp = sphere_geodesic_distance(dir, dir_yp);
+    float3 dir_x0 = cube_uvw_to_dir(float3(float2(x0.texel + 0.5) / velocity.resolution, x0.face));
+    float3 dir_x1 = cube_uvw_to_dir(float3(float2(x1.texel + 0.5) / velocity.resolution, x1.face));
+    float3 dir_y0 = cube_uvw_to_dir(float3(float2(y0.texel + 0.5) / velocity.resolution, y0.face));
+    float3 dir_y1 = cube_uvw_to_dir(float3(float2(y1.texel + 0.5) / velocity.resolution, y1.face));
+    float dist_x0 = sphere_geodesic_distance(dir, dir_x0) * r;
+    float dist_x1 = sphere_geodesic_distance(dir, dir_x1) * r;
+    float dist_y0 = sphere_geodesic_distance(dir, dir_y0) * r;
+    float dist_y1 = sphere_geodesic_distance(dir, dir_y1) * r;
 
-    // vertical pressure gradient, same Neumann (copy-of-center) ghost as
-    // the Jacobi step above
-    float dr = velocity.thickness / velocity.vertical_resolution;
-    float r = 1.0 + dr * (cell.layer + 0.5);
-    CubeCoord zm_cell, zp_cell;
-    bool zm_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, zm_cell);
-    bool zp_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, zp_cell);
-    float p_center = pressure_correction[0].load<1>(cell);
-    float p_zm = zm_ok ? pressure_correction[0].load<1>(zm_cell) : p_center;
-    float p_zp = zp_ok ? pressure_correction[0].load<1>(zp_cell) : p_center;
-
-    // sub-grid terrain porosity (see compute_divergence): a blocked face
-    // falls back to the Neumann (copy-of-center) ghost instead of the real
-    // neighbor pressure -- the same treatment the domain's outer walls
-    // already get -- so the pressure force doesn't accelerate fluid through
-    // a face that's (partially) rock
-    float mip = heightmap_mip_level(velocity.resolution);
-    bool self_is_bottom = cell.layer == 0;
-    bool below_is_bottom = zm_ok && cell.layer == 1;
-    float open_self = open_fraction(dir, r, mip, self_is_bottom);
-    float open_xm = min(open_self, open_fraction(dir_xm, r, mip, self_is_bottom));
-    float open_xp = min(open_self, open_fraction(dir_xp, r, mip, self_is_bottom));
-    float open_ym = min(open_self, open_fraction(dir_ym, r, mip, self_is_bottom));
-    float open_yp = min(open_self, open_fraction(dir_yp, r, mip, self_is_bottom));
-    float open_zm = zm_ok ? min(open_self, open_fraction(dir, r - dr, mip, below_is_bottom)) : 0.0;
-    float open_zp = zp_ok ? open_self : 0.0;
-
-    float px0_eff = lerp(p_center, px0, open_xm);
-    float px1_eff = lerp(p_center, px1, open_xp);
-    float py0_eff = lerp(p_center, py0, open_ym);
-    float py1_eff = lerp(p_center, py1, open_yp);
-    float p_zm_eff = lerp(p_center, p_zm, open_zm);
-    float p_zp_eff = lerp(p_center, p_zp, open_zp);
-
-    float2 grad = float2((px1_eff - px0_eff) / (dist_xm + dist_xp), (py1_eff - py0_eff) / (dist_ym + dist_yp));
-    float grad_z = (p_zp_eff - p_zm_eff) / (2.0 * dr);
+    float2 grad = float2((px1 - px0) / (dist_x0 + dist_x1), (py1 - py0) / (dist_y0 + dist_y1));
+    // both ghosts (bottom Neumann copy, top Dirichlet 0) sit at the same
+    // canonical spacing dr, so this always spans 2*dr regardless of which
+    // boundary (if any) is being ghosted
+    float grad_z = (pz1 - pz0) / (2.0 * dr);
 
     // the correction was solved for as u -= (dt/rho0) * grad(p) folded into
     // a single constant-coefficient Poisson solve (see compute_divergence),
@@ -331,12 +236,6 @@ void apply(uint3 thread: SV_DispatchThreadID)
     float3 vel = velocity.load(cell);
     vel.xy -= grad / rho0;
     vel.z -= grad_z / rho0;
-
-    // damp velocity toward zero in proportion to how much of this cell's
-    // footprint is rock, so residual momentum doesn't linger inside solid
-    // ground (and doesn't reappear as a phantom gust if the terrain there
-    // later recedes)
-    vel *= open_self;
 
     velocity.store(cell, vel);
 }

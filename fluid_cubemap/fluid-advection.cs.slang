@@ -93,22 +93,23 @@ void advect(uint3 thread: SV_DispatchThreadID)
     float dr = velocity.thickness / velocity.vertical_resolution;
     float r = 1.0 + dr * (cell.layer + 0.5);
 
-    float3 pos = cube_uvw_to_dir(float3((cell.texel + 0.5) / velocity.resolution, cell.face));
+    float3 dir = cube_uvw_to_dir(float3((cell.texel + 0.5) / velocity.resolution, cell.face));
 
-    float3 sampled_pos;
+    float3 sampled_dir;
     float sampled_r;
-    integrate_velocity(pos, r, sampled_pos, sampled_r);
-    float sampled_layer = radius_to_vertical_layer(sampled_r);
+    integrate_velocity(dir, r, sampled_dir, sampled_r);
 
-    float3 sampled_velocity = velocity.sample(sampled_pos, sampled_layer);
+    float3 sampled_pos = sampled_dir * sampled_r;
+
+    float3 sampled_velocity = velocity.sample(sampled_pos);
 
     // sampled_velocity is expressed at sampled_pos, not pos -- rotate it
     // into pos's tangent plane before storing it there (this correctly
     // carries the radial component too: transport is a rigid rotation
     // mapping sampled_pos to pos, so a component along sampled_pos maps to
     // the same-magnitude component along pos)
-    float3 transported_velocity = sphere_parallel_transport(sampled_pos, pos, sampled_velocity);
-    velocity_out.store(cell, velocity.to_local(pos, transported_velocity));
+    float3 transported_velocity = sphere_parallel_transport(sampled_dir, dir, sampled_velocity);
+    velocity_out.store(cell, velocity.to_local(dir, transported_velocity));
 
     for (cell.channel = 0; cell.channel < smoke.channels; cell.channel += 4)
     {

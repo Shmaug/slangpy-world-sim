@@ -177,7 +177,7 @@ struct SphericalScalarField
     // normalized to 1 at the surface r=1
     float sample_density(float r)
     {
-        return exp(-(r - radius) / scale_height);
+        return scale_height > 0 ? exp(-(r - radius) / scale_height) : 1;
     }
 
     uint flatten_index(CubeCoord coord, uint mip = 0)
@@ -235,14 +235,20 @@ struct SphericalScalarField
 
     vector<float,N> sample<int N>(float3 dir, uint channel, float vertical_layer, uint mip)
     {
-        float layer_clamped = clamp(vertical_layer, 0, float(vertical_resolution - 1));
-        uint layer_lo = uint(floor(layer_clamped));
-        uint layer_hi = min(layer_lo + 1, vertical_resolution - 1);
-        float t = layer_clamped - float(layer_lo);
-        return lerp(sample_layer<N>(dir, channel, layer_lo, mip), sample_layer<N>(dir, channel, layer_hi, mip), t);
+        int layer_lo = int(floor(vertical_layer));
+        if (frac(vertical_layer) < 0.5)
+            layer_lo -= 1;
+
+        let z0 = sample_layer<N>(dir, channel, layer_lo, mip);
+        let z1 = sample_layer<N>(dir, channel, layer_lo + 1, mip);
+
+        return lerp(z0, z1, vertical_layer - float(layer_lo + 0.5));
     }
 
-    // 3d sampling, vertical_layer extracted from length(pos)
+    // 3d sampling, vertical_layer extracted from length(pos); layers are
+    // texel-centered (like a 3D texture), so the layer's r-center sits at
+    // radius + thickness/vertical_resolution*(layer+0.5) -- hence the -0.5
+    // to invert that back to a continuous layer coordinate
     vector<float,N> sample<int N>(float3 pos, uint channel, uint mip)
     {
         float h = length(pos);
@@ -251,11 +257,11 @@ struct SphericalScalarField
         return sample<N>(dir, channel, vertical_layer, mip);
     }
 
-    vector<float,N> sample_layer_nearest<int N>(float3 dir, uint channel, uint vertical_layer, uint mip)
+    vector<float,N> sample_layer_nearest<int N>(float3 dir, uint channel, int vertical_layer, uint mip)
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
         int2 texel = clamp(int2(cube_uvw.xy * (resolution >> mip)), 0, int(resolution >> mip) - 1);
-        CubeCoord cell = CubeCoord(uint2(texel), uint(cube_uvw.z), uint(vertical_layer), channel);
+        CubeCoord cell = CubeCoord(uint2(texel), uint(cube_uvw.z), vertical_layer, channel);
         return load<N>(cell);
     }
 
@@ -264,7 +270,7 @@ struct SphericalScalarField
         float h = length(pos);
         float3 dir = pos / h;
         float vertical_layer = vertical_resolution * ((h - radius) / thickness);
-        return sample_layer_nearest<N>(dir, channel, uint(vertical_layer), mip);
+        return sample_layer_nearest<N>(dir, channel, int(floor(vertical_layer)), mip);
     }
 }
 
@@ -284,7 +290,7 @@ struct SphericalVelocityField
     // normalized to 1 at the surface r=1
     float sample_density(float r)
     {
-        return exp(-max(0, r - radius) / scale_height);
+        return scale_height > 0 ? exp(-(r - radius) / scale_height) : 1;
     }
 
     uint flatten_index(CubeCoord coord)
@@ -329,7 +335,7 @@ struct SphericalVelocityField
         return sphere_parallel_transport(dir, dst_dir, vel);
     }
 
-    float3 sample_layer(float3 dir, uint vertical_layer)
+    float3 sample_layer(float3 dir, int vertical_layer)
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
 
@@ -357,11 +363,14 @@ struct SphericalVelocityField
 
     float3 sample(float3 dir, float vertical_layer)
     {
-        float layer_clamped = clamp(vertical_layer, 0, float(vertical_resolution - 1));
-        uint layer_lo = uint(floor(layer_clamped));
-        uint layer_hi = min(layer_lo + 1, vertical_resolution - 1);
-        float t = layer_clamped - float(layer_lo);
-        return lerp(sample_layer(dir, layer_lo), sample_layer(dir, layer_hi), t);
+        int layer_lo = int(floor(vertical_layer));
+        if (frac(vertical_layer) < 0.5)
+            layer_lo -= 1;
+
+        let z0 = sample_layer(dir, layer_lo);
+        let z1 = sample_layer(dir, layer_lo + 1);
+
+        return lerp(z0, z1, vertical_layer - float(layer_lo + 0.5));
     }
 
     // 3d sampling, vertical_layer extracted from length(pos)
@@ -373,7 +382,7 @@ struct SphericalVelocityField
         return sample(dir, vertical_layer);
     }
 
-    float3 sample_layer_nearest(float3 dir, uint vertical_layer)
+    float3 sample_layer_nearest(float3 dir, int vertical_layer)
     {
         float3 cube_uvw = dir_to_cube_uvw(dir);
         int2 texel = clamp(int2(cube_uvw.xy * resolution), 0, int(resolution) - 1);
@@ -386,6 +395,6 @@ struct SphericalVelocityField
         float h = length(pos);
         float3 dir = pos / h;
         float vertical_layer = vertical_resolution * ((h - radius) / thickness);
-        return sample_layer_nearest(dir, uint(vertical_layer));
+        return sample_layer_nearest(dir, int(floor(vertical_layer)));
     }
 }
