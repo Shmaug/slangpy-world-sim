@@ -163,7 +163,7 @@ class App:
         self.cloud_timestep = spy.ui.DragFloat(group, "Timestep", 1.0/60.0, speed=1/120.0)
         self.cloud_resolution = spy.ui.DragInt(group, "Resolution (log2)", 9, min=0, max=12, callback=update_cb)
         self.cloud_vertical_resolution = spy.ui.DragInt(group, "Vertical resolution", 4, min=1, max=16, callback=update_cb)
-        self.solver_iterations = spy.ui.DragInt(group, "Solver iterations", 10, callback=update_cb)
+        self.solver_iterations = spy.ui.DragInt(group, "Solver iterations", 5, callback=update_cb)
         self.solver_multires = spy.ui.CheckBox(group, "Multiresolution Solver", value=True, callback=update_cb)
         self.solver_fine_iterations = spy.ui.DragInt(group, "Multiresolution sub-iterations", 4, callback=update_cb)
         update_cb(None)
@@ -173,20 +173,21 @@ class App:
         self.emit_speed = spy.ui.DragFloat(widget, "Emit speed", value=1, speed=0.01)
         self.emit_vertical_speed = spy.ui.DragFloat(widget, "Emit vertical speed", value=0.1, speed=0.01)
         self.drag:list[spy.float3] = []
-        def emit_drag(smoke,velocity,command_encoder):
-            if len(self.drag) > 1:
-                self.emit_drag_kernel.dispatch(
-                    self.cloud_sim.dispatch_dim(),
-                    {
-                        "smoke": smoke,
-                        "velocity": velocity,
-                        "start_dir": self.drag[-2],
-                        "end_dir": self.drag[-1],
-                        "radius": spy.math.radians(self.emit_radius.value),
-                        "speed": self.emit_speed.value,
-                        "vertical_speed": self.emit_vertical_speed.value,
-                    },
-                    command_encoder)
+        def emit_drag(command_encoder):
+            self.emit_drag_kernel.dispatch(
+                self.cloud_sim.dispatch_dim(),
+                {
+                    "smoke": self.cloud_sim.smoke_field(),
+                    "velocity": self.cloud_sim.velocity_field(),
+                    "smoke_out": self.cloud_sim.smoke_field(1),
+                    "velocity_out": self.cloud_sim.velocity_field(1),
+                    "start_dir": self.drag[-2] if len(self.drag) > 1 else spy.float3(0,0,0),
+                    "end_dir": self.drag[-1] if len(self.drag) > 1 else spy.float3(0,0,0),
+                    "radius": spy.math.radians(self.emit_radius.value) if len(self.drag) > 1 else 0,
+                    "speed": self.emit_speed.value,
+                    "vertical_speed": self.emit_vertical_speed.value,
+                },
+                command_encoder)
         self.cloud_sim.emitters.append(emit_drag)
         
     def on_resize(self, width: int, height: int):

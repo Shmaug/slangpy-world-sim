@@ -39,7 +39,7 @@ void sample_atmosphere_density(float3 p, out float3 rayleigh, out float mie, out
     float height = len_p - 1.0;
 
     if (cloud_density > 0 && height >= 0 && height <= planet_clouds.thickness)
-        cloud = cloud_density * planet_clouds.sample(p, 0);
+        cloud = cloud_density * planet_clouds.sample<1>(p, 0, 0).x;
     else
         cloud = 0;
     
