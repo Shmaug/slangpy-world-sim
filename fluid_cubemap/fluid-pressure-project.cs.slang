@@ -3,12 +3,35 @@ import SphericalField;
 
 uniform SphericalVelocityField velocity;
 uniform SphericalScalarField divergence;
-uniform SphericalScalarField pressure_correction[2];
+uniform SphericalScalarField pressure_correction;
 // mip level to read from for `resample`
 uniform uint src_mip_level;
 // mip level of pressure_correction (and divergence) that `step` relaxes this dispatch;
 // `compute_divergence` and `apply` always operate at mip 0
 uniform uint dst_mip_level;
+uniform uint color;
+
+// classifies a cell into one of 4 colors for red-black Gauss-Seidel such
+// that no two same-colored cells are ever direct 4-neighbors. A plain
+// 2-color checkerboard is topologically impossible on a cubemap: at each of
+// the 8 cube corners three faces meet, and their corner-most cells form a
+// 3-cycle (odd loop) in the neighbor graph, which has no valid 2-coloring.
+// Concretely, (texel.x + texel.y) parity fails to flip across every seam
+// between an X face (0,1) and a Y face (2,3) -- Z-face seams are fine and
+// need no fixup -- so the whole boundary row/column along those 4 edges is
+// bumped to a second, independent pair of colors (2/3), with the Y-face
+// side's parity additionally flipped so it still lands opposite its X-face
+// neighbor across the seam
+int cube_gauss_seidel_color(CubeCoord cell, int resolution)
+{
+    bool is_seam =
+        (cell.face == 0 || cell.face == 1) ? (cell.texel.y == 0 || cell.texel.y == resolution - 1) :
+            (cell.face == 2 || cell.face == 3) ? (cell.texel.x == 0 || cell.texel.x == resolution - 1) :
+            false;
+    int flip = (is_seam && (cell.face == 2 || cell.face == 3)) ? 1 : 0;
+    int parity = (cell.texel.x + cell.texel.y + flip) & 1;
+    return is_seam ? 2 + parity : parity;
+}
 
 Texture2D<float> surface_height;
 Texture2D<float> surface_height2;
@@ -96,6 +119,9 @@ void step(uint3 thread: SV_DispatchThreadID)
     if (!divergence.bounds_check(cell, dst_mip_level))
         return;
 
+    if (color != cube_gauss_seidel_color(cell, divergence.resolution >> dst_mip_level))
+        return;
+
     float dr = velocity.thickness / velocity.vertical_resolution;
     float r = 1.0 + dr * (cell.layer + 0.5);
 
@@ -145,22 +171,22 @@ void step(uint3 thread: SV_DispatchThreadID)
     // is just a copy of this cell's own (current-iterate) pressure. At the
     // open top the atmosphere drains to ambient pressure 0 just past the
     // last layer (Dirichlet).
-    float p_center = pressure_correction[0].load<1>(cell, dst_mip_level);
+    float p_center = pressure_correction.load<1>(cell, dst_mip_level);
 
     float p = 0;
-    p += w_x0 * pressure_correction[0].load<1>(x0, dst_mip_level).x;
-    p += w_x1 * pressure_correction[0].load<1>(x1, dst_mip_level).x;
-    p += w_y0 * pressure_correction[0].load<1>(y0, dst_mip_level).x;
-    p += w_y1 * pressure_correction[0].load<1>(y1, dst_mip_level).x;
-    p += w_z0 * (z0_ok ? pressure_correction[0].load<1>(z0, dst_mip_level).x : p_center);
-    p += w_z1 * (z1_ok ? pressure_correction[0].load<1>(z1, dst_mip_level).x : 0);
+    p += w_x0 * pressure_correction.load<1>(x0, dst_mip_level).x;
+    p += w_x1 * pressure_correction.load<1>(x1, dst_mip_level).x;
+    p += w_y0 * pressure_correction.load<1>(y0, dst_mip_level).x;
+    p += w_y1 * pressure_correction.load<1>(y1, dst_mip_level).x;
+    p += w_z0 * (z0_ok ? pressure_correction.load<1>(z0, dst_mip_level).x : p_center);
+    p += w_z1 * (z1_ok ? pressure_correction.load<1>(z1, dst_mip_level).x : 0);
 
     p -= divergence.load<1>(cell, dst_mip_level).x;
 
     // a cell fully walled in by terrain has every weight collapse to 0 --
     // fall back to holding its current value rather than dividing by 0
     float total_w = w_x0 + w_x1 + w_y0 + w_y1 + w_z0 + w_z1;
-    pressure_correction[1].store(cell, total_w > 1e-8 ? p / total_w : p_center, dst_mip_level);
+    pressure_correction.store(cell, total_w > 1e-8 ? p / total_w : p_center, dst_mip_level);
 }
 
 [shader("compute")]
@@ -168,16 +194,16 @@ void step(uint3 thread: SV_DispatchThreadID)
 void resample(uint3 thread: SV_DispatchThreadID)
 {
     CubeCoord cell = CubeCoord(thread.xy, thread.z % 6, thread.z / 6, 0);
-    if (!pressure_correction[0].bounds_check(cell, dst_mip_level))
+    if (!pressure_correction.bounds_check(cell, dst_mip_level))
         return;
     
-    uint dst_res = pressure_correction[0].resolution >> dst_mip_level;
+    uint dst_res = pressure_correction.resolution >> dst_mip_level;
 
     float3 dir = cube_uvw_to_dir(float3((float2(cell.texel) + 0.5) / dst_res, cell.face));
 
     // pass the cell's own layer through -- omitting it would silently
     // default to layer 0, scrambling every other layer's multires solve
-    pressure_correction[1].store(cell, pressure_correction[0].sample_layer<1>(dir, 0, cell.layer, src_mip_level), dst_mip_level);
+    pressure_correction.store(cell, pressure_correction.sample_layer<1>(dir, 0, cell.layer, src_mip_level), dst_mip_level);
 }
 
 [shader("compute")]
@@ -188,10 +214,10 @@ void apply(uint3 thread: SV_DispatchThreadID)
     if (!velocity.bounds_check(cell))
         return;
 
-    CubeCoord x0 = pressure_correction[0].get_neighbor(cell, int2(-1, 0));
-    CubeCoord x1 = pressure_correction[0].get_neighbor(cell, int2( 1, 0));
-    CubeCoord y0 = pressure_correction[0].get_neighbor(cell, int2(0, -1));
-    CubeCoord y1 = pressure_correction[0].get_neighbor(cell, int2(0, 1));
+    CubeCoord x0 = pressure_correction.get_neighbor(cell, int2(-1, 0));
+    CubeCoord x1 = pressure_correction.get_neighbor(cell, int2( 1, 0));
+    CubeCoord y0 = pressure_correction.get_neighbor(cell, int2(0, -1));
+    CubeCoord y1 = pressure_correction.get_neighbor(cell, int2(0, 1));
     CubeCoord z0, z1;
     bool z0_ok = vertical_neighbor(cell, -1, velocity.vertical_resolution, z0);
     bool z1_ok = vertical_neighbor(cell,  1, velocity.vertical_resolution, z1);
@@ -201,13 +227,13 @@ void apply(uint3 thread: SV_DispatchThreadID)
     float dr = velocity.thickness / velocity.vertical_resolution;
     float r = 1.0 + dr * (cell.layer + 0.5);
 
-    float p_center = pressure_correction[0].load<1>(cell);
-    float px0 = pressure_correction[0].load<1>(x0);
-    float px1 = pressure_correction[0].load<1>(x1);
-    float py0 = pressure_correction[0].load<1>(y0);
-    float py1 = pressure_correction[0].load<1>(y1);
-    float pz0 = z0_ok ? pressure_correction[0].load<1>(z0) : p_center;
-    float pz1 = z1_ok ? pressure_correction[0].load<1>(z1) : 0;
+    float p_center = pressure_correction.load<1>(cell);
+    float px0 = pressure_correction.load<1>(x0);
+    float px1 = pressure_correction.load<1>(x1);
+    float py0 = pressure_correction.load<1>(y0);
+    float py1 = pressure_correction.load<1>(y1);
+    float pz0 = z0_ok ? pressure_correction.load<1>(z0) : p_center;
+    float pz1 = z1_ok ? pressure_correction.load<1>(z1) : 0;
 
     // same non-uniform central difference as compute_divergence, so the
     // gradient removed here matches the spacing the divergence/Laplacian

@@ -26,7 +26,7 @@ class CubeFluidSimulator:
         self.smoke_buf:list[spy.Buffer] = []
         self.velocity_buf:list[spy.Buffer] = []
         self.divergence_buf:spy.Buffer = None # type:ignore
-        self.pressure_correction_buf:list[spy.Buffer] = []
+        self.pressure_correction_buf:spy.Buffer = None # type:ignore
         self.smoke_readback:spy.Buffer = None # type:ignore
         self.divergence_readback:spy.Buffer = None # type:ignore
 
@@ -41,7 +41,7 @@ class CubeFluidSimulator:
         self.radius = 1.0
         self.thickness = 0.1
         self.density_scale_height = 0.05
-        self.solver_iterations = 10
+        self.solver_iterations = 5
         self.solver_fine_iterations = 4
         self.multires_solve = True
         self.preserve_smoke = True
@@ -74,13 +74,13 @@ class CubeFluidSimulator:
             self.channels_ui = spy.ui.DragInt(widget, "Channels", self.channels, min=1, max=4, callback=create_cb)
             self.resolution_ui = spy.ui.ComboBox(widget, "Resolution", int(spy.math.ceil(spy.math.log2(self.resolution))), items=[ str(1 << i) for i in range(13) ], callback=create_cb)
             self.vertical_resolution_ui = spy.ui.ComboBox(widget, "Vertical resolution", self.vertical_resolution-1, items=[ str(i) for i in range(1,8) ], callback=create_cb)
-            self.radius_ui = spy.ui.DragFloat(widget, "Radius", 1, min=1e-4, speed = 0.01, callback=update_cb)
-            self.thickness_ui = spy.ui.DragFloat(widget, "Thickness", 0.25, min=1e-4, speed = 0.01, callback=update_cb)
-            self.atmosphere_scale_height_ui = spy.ui.DragFloat(widget, "Atmosphere scale height", 0.05, min=1e-4, speed = 0.01, callback=update_cb)
-            self.solver_iterations_ui = spy.ui.DragInt(widget, "Solver iterations", value=10, callback=update_cb)
-            self.solver_fine_iterations_ui = spy.ui.DragInt(widget, "Solver fine iterations", value=4, callback=update_cb)
-            self.multires_solve_ui = spy.ui.CheckBox(widget, "Multiresolution solver", value=True, callback=update_cb)
-            self.preserve_smoke_ui = spy.ui.CheckBox(widget, "Preserve smoke quantity", value=True, callback=update_cb)
+            self.radius_ui = spy.ui.DragFloat(widget, "Radius", self.radius, min=1e-4, speed = 0.01, callback=update_cb)
+            self.thickness_ui = spy.ui.DragFloat(widget, "Thickness", self.thickness, min=1e-4, speed = 0.01, callback=update_cb)
+            self.atmosphere_scale_height_ui = spy.ui.DragFloat(widget, "Atmosphere scale height", self.density_scale_height, min=1e-4, speed = 0.01, callback=update_cb)
+            self.solver_iterations_ui = spy.ui.DragInt(widget, "Solver iterations", value=self.solver_iterations, callback=update_cb)
+            self.solver_fine_iterations_ui = spy.ui.DragInt(widget, "Solver fine iterations", value=self.solver_fine_iterations, callback=update_cb)
+            self.multires_solve_ui = spy.ui.CheckBox(widget, "Multiresolution solver", value=self.multires_solve, callback=update_cb)
+            self.preserve_smoke_ui = spy.ui.CheckBox(widget, "Preserve smoke quantity", value=self.preserve_smoke, callback=update_cb)
             self.smoke_amount_ui = spy.ui.Text(widget, f"Smoke: {float(0):.3f}")
             self.divergence_ui = spy.ui.Text(widget, f"Divergence: {float(0):.3f}")
         else:
@@ -91,8 +91,8 @@ class CubeFluidSimulator:
     def _create_buffers(self):
         total_texels = sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()))
         self.smoke_buf = [self.device.create_buffer(
-            element_count = total_texels,
-            struct_size = 4 * self.channels,
+            element_count = total_texels * self.channels,
+            struct_size = 4,
             usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
         ) for _ in range(2) ]
         self.velocity_buf = [self.device.create_buffer(
@@ -105,15 +105,15 @@ class CubeFluidSimulator:
             struct_size = 4,
             usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
         )
-        self.pressure_correction_buf = [ self.device.create_buffer(
+        self.pressure_correction_buf = self.device.create_buffer(
             element_count = total_texels,
             struct_size = 4,
             usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
-        ) for _ in range(2) ]
+        )
 
         self.smoke_readback = self.device.create_buffer(
-            element_count = 6 * self.vertical_resolution,
-            struct_size = 4 * self.channels,
+            element_count = 6 * self.vertical_resolution * self.channels,
+            struct_size = 4,
             format = spy.Format.r32_float,
             memory_type = spy.MemoryType.read_back,
             usage = spy.BufferUsage.copy_destination,
@@ -161,7 +161,7 @@ class CubeFluidSimulator:
             vars[0], vars[1] = vars[1], vars[0]
 
         if self.reset:
-            for t in self.smoke_buf + self.velocity_buf + self.pressure_correction_buf:
+            for t in self.smoke_buf + self.velocity_buf:
                 command_encoder.clear_buffer(t)
             self.reset = False
 
@@ -176,7 +176,7 @@ class CubeFluidSimulator:
             vars = {
                 "velocity": self.velocity_field(0),
                 "divergence": field_vars(self.divergence_buf),
-                "pressure_correction": [ field_vars(self.pressure_correction_buf[i]) for i in range(2) ],
+                "pressure_correction": field_vars(self.pressure_correction_buf),
                 "dst_mip_level": dst_mip,
                 "src_mip_level": src_mip,
                 "terrain_height": 0,
@@ -234,31 +234,30 @@ class CubeFluidSimulator:
         # solve divergence
         if self.solver_iterations > 0:
             dispatch(self.compute_divergence_kernel, pressure_project_vars())
+            def solver_step(dst_mip: int = 0, src_mip: int = 0):
+                for color in range(4):
+                    dispatch(self.pressure_project_step_kernel, pressure_project_vars(dst_mip, src_mip) | {"color": color}, dst_mip)
             if self.multires_solve:
                 generate_mips(self.divergence_buf)
 
                 for _ in range(self.solver_iterations):
                     # pre-smooth on the fine level
                     for _ in range(self.solver_fine_iterations):
-                        dispatch(self.pressure_project_step_kernel, pressure_project_vars())
-                        swap(self.pressure_correction_buf)
+                        solver_step()
 
                     # fine -> coarse
                     for mip in range(1,self.mip_count()):
-                        dispatch(self.pressure_project_resample_kernel, pressure_project_vars(mip, mip-1))
+                        dispatch(self.pressure_project_resample_kernel, pressure_project_vars(mip, mip-1), mip)
 
                     # coarse -> fine
                     for mip in range(self.mip_count()-1, 2, -1):
                         # interpolate mip+1 -> mip
-                        dispatch(self.pressure_project_resample_kernel, pressure_project_vars(mip, mip+1), mip=mip)
-                        swap(self.pressure_correction_buf)
+                        dispatch(self.pressure_project_resample_kernel, pressure_project_vars(mip, mip+1), mip)
                         # solve on mip
-                        dispatch(self.pressure_project_step_kernel, pressure_project_vars(mip), mip=mip)
-                        swap(self.pressure_correction_buf)
+                        solver_step(mip)
             else:
                 for _ in range(self.solver_iterations):
-                    dispatch(self.pressure_project_step_kernel, pressure_project_vars())
-                    swap(self.pressure_correction_buf)
+                    solver_step()
 
             dispatch(self.pressure_project_apply_kernel, pressure_project_vars())
 
@@ -266,20 +265,20 @@ class CubeFluidSimulator:
         
         generate_mips(self.smoke_buf[0])
         
-        if self.divergence_ui:
+        if self.divergence_ui is not None:
             dispatch(self.compute_divergence_kernel, pressure_project_vars())
             generate_mips(self.divergence_buf)
             command_encoder.copy_buffer(
                 self.divergence_readback, 0,
-                self.divergence_buf, 4 * sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
-                self.vertical_resolution * 6 * 4
+                self.divergence_buf, self.divergence_buf.size - self.divergence_readback.size,
+                self.divergence_readback.size
             )
-            self.divergence_ui.text = f"Divergence: {self.divergence_readback.to_numpy().view(np.float32).mean() * (6 * self.resolution * self.resolution):.3f}"
-        if self.smoke_amount_ui:
+            self.divergence_ui.text = f"Divergence: {self.divergence_readback.to_numpy().view(np.float32).mean():.2e}"
+        if self.smoke_amount_ui is not None:
             command_encoder.copy_buffer(
                 self.smoke_readback, 0,
-                self.smoke_buf[0], 4 * sum(self.vertical_resolution * 6 * (self.resolution >> i) * (self.resolution >> i) for i in range(self.mip_count()-1)),
-                self.vertical_resolution * 6 * 4
+                self.smoke_buf[0], self.smoke_buf[0].size - self.smoke_readback.size,
+                self.smoke_readback.size
             )
-            self.smoke_amount_ui.text = f"Smoke: {self.smoke_readback.to_numpy().view(np.float32).mean() * self.vertical_resolution * 6 * (self.resolution * self.resolution):.3f}"
+            self.smoke_amount_ui.text = f"Smoke: {self.smoke_readback.to_numpy().view(np.float32).mean() * self.vertical_resolution * 6 * (self.resolution * self.resolution):.2e}"
 
